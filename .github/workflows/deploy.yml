@@ -106,6 +106,22 @@ jobs:
           echo "issuance=$ISSUANCE" >> $GITHUB_OUTPUT
           echo "verification=$VERIFICATION" >> $GITHUB_OUTPUT
 
+      - name: Ensure ECR repositories exist
+        run: |
+          FRONTEND_URI=${{ steps.ecr.outputs.frontend }}
+          ISSUANCE_URI=${{ steps.ecr.outputs.issuance }}
+          VERIFICATION_URI=${{ steps.ecr.outputs.verification }}
+
+          for REPO_URI in "$FRONTEND_URI" "$ISSUANCE_URI" "$VERIFICATION_URI"; do
+            REPO_NAME=$(echo "$REPO_URI" | cut -d'/' -f2)
+            if ! aws ecr describe-repositories --repository-names "$REPO_NAME" --region $AWS_REGION >/dev/null 2>&1; then
+              echo "Creating ECR repository: $REPO_NAME"
+              aws ecr create-repository --repository-name "$REPO_NAME" --region $AWS_REGION >/dev/null
+            else
+              echo "ECR repository exists: $REPO_NAME"
+            fi
+          done
+
       - name: ECR Login
         run: aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $(echo "${{ steps.ecr.outputs.frontend }}" | cut -d'/' -f1)
 
