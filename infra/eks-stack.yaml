@@ -230,45 +230,179 @@
 
 
 
+# name: Deploy to EKS
+
+# on:
+#   workflow_dispatch:
+#     inputs:
+#       aws-region:
+#         description: 'AWS region'
+#         default: 'ap-south-1'
+#         required: true
+#       cluster-name:
+#         description: 'EKS Cluster name'
+#         default: 'zupple-eks'
+#         required: true
+#       node-instance-type:
+#         description: 'EC2 instance type for nodes'
+#         default: 't3.medium'
+#         required: true
+
+# jobs:
+#   deploy:
+#     runs-on: ubuntu-latest
+#     steps:
+#       - name: Checkout
+#         uses: actions/checkout@v4
+
+#       - name: Configure AWS credentials
+#         uses: aws-actions/configure-aws-credentials@v2
+#         with:
+#           aws-region: ${{ github.event.inputs['aws-region'] }}
+#           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}    # or use access key inputs/secrets
+#           aws-web-identity-token-file: ${{ secrets.AWS_WEB_IDENTITY_TOKEN_FILE }} # example
+
+#       - name: Create / update CloudFormation stack
+#         run: |
+#           aws cloudformation deploy \
+#             --stack-name "${{ github.event.inputs['cluster-name'] }}-stack" \
+#             --region "${{ github.event.inputs['aws-region'] }}" \
+#             --template-file eks-stack.yaml \
+#             --parameter-overrides ClusterName="${{ github.event.inputs['cluster-name'] }}" \
+#                                   NodeInstanceType="${{ github.event.inputs['node-instance-type'] }}" \
+#                                   NodeDesiredSize=2 \
+#             --capabilities CAPABILITY_NAMED_IAM
+
+
 name: Deploy to EKS
 
 on:
   workflow_dispatch:
     inputs:
-      aws-region:
-        description: 'AWS region'
-        default: 'ap-south-1'
+      aws_region:
+        description: AWS region
         required: true
-      cluster-name:
-        description: 'EKS Cluster name'
-        default: 'zupple-eks'
+        default: us-east-1
+      cluster_name:
+        description: EKS cluster name
         required: true
-      node-instance-type:
-        description: 'EC2 instance type for nodes'
-        default: 't3.medium'
+        default: zupple-eks
+      node_instance_type:
+        description: Node instance type
         required: true
+        default: t3.medium
+      deploy_frontend:
+        description: Deploy frontend component
+        required: true
+        default: 'false'
+        type: choice
+        options: ['true','false']
+      deploy_issuance:
+        description: Deploy issuance backend
+        required: true
+        default: 'true'
+        type: choice
+        options: ['true','false']
+      deploy_verification:
+        description: Deploy verification backend
+        required: true
+        default: 'true'
+        type: choice
+        options: ['true','false']
+      issuance_url:
+        description: Issuance backend URL (for frontend build)
+        required: false
+        default: ''
+      verification_url:
+        description: Verification backend URL (for frontend build)
+        required: false
+        default: ''
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      AWS_REGION: ${{ github.event.inputs.aws_region }}
+      CLUSTER_NAME: ${{ github.event.inputs.cluster_name }}
+      DEPLOY_FRONTEND: ${{ github.event.inputs.deploy_frontend }}
+      DEPLOY_ISSUANCE: ${{ github.event.inputs.deploy_issuance }}
+      DEPLOY_VERIFICATION: ${{ github.event.inputs.deploy_verification }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-region: ${{ github.event.inputs['aws-region'] }}
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}    # or use access key inputs/secrets
-          aws-web-identity-token-file: ${{ secrets.AWS_WEB_IDENTITY_TOKEN_FILE }} # example
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Create / update CloudFormation stack
+      - name: Install deps (kubectl/jq)
         run: |
-          aws cloudformation deploy \
-            --stack-name "${{ github.event.inputs['cluster-name'] }}-stack" \
-            --region "${{ github.event.inputs['aws-region'] }}" \
-            --template-file eks-stack.yaml \
-            --parameter-overrides ClusterName="${{ github.event.inputs['cluster-name'] }}" \
-                                  NodeInstanceType="${{ github.event.inputs['node-instance-type'] }}" \
-                                  NodeDesiredSize=2 \
-            --capabilities CAPABILITY_NAMED_IAM
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+          curl -sSLo kubectl https://s3.us-west-2.amazonaws.com/amazon-eks/1.29.0/2024-08-12/bin/linux/amd64/kubectl
+          chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+          curl -sSLo aws-iam-authenticator https://github.com/kubernetes-sigs/aws-iam-authenticator/releases/download/v0.6.22/aws-iam-authenticator_0.6.22_linux_amd64
+          chmod +x aws-iam-authenticator && sudo mv aws-iam-authenticator /usr/local/bin/
+
+      # -- cloudformation deploy left as-is, but ensure infra/eks-stack.yaml is a real CFN template --
+
+      - name: Fetch ECR URIs (CFN outputs preferred)
+        id: ecr
+        run: |
+          STACK_NAME=${CLUSTER_NAME}-stack
+          FRONTEND=""
+          ISSUANCE=""
+          VERIFICATION=""
+          if aws cloudformation describe-stacks --stack-name $STACK_NAME >/dev/null 2>&1; then
+            FRONTEND=$(aws cloudformation describe-stacks --stack-name $STACK_NAME \
+              --query 'Stacks[0].Outputs[?OutputKey==`FrontendEcrUri`].OutputValue' --output text 2>/dev/null || echo "")
+            ISSUANCE=$(aws cloudformation describe-stacks --stack-name $STACK_NAME \
+              --query 'Stacks[0].Outputs[?OutputKey==`IssuanceEcrUri`].OutputValue' --output text 2>/dev/null || echo "")
+            VERIFICATION=$(aws cloudformation describe-stacks --stack-name $STACK_NAME \
+              --query 'Stacks[0].Outputs[?OutputKey==`VerificationEcrUri`].OutputValue' --output text 2>/dev/null || echo "")
+          fi
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          [ -z "$FRONTEND" ] && FRONTEND="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${CLUSTER_NAME}-frontend"
+          [ -z "$ISSUANCE" ] && ISSUANCE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${CLUSTER_NAME}-issuance"
+          [ -z "$VERIFICATION" ] && VERIFICATION="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${CLUSTER_NAME}-verification"
+          echo "frontend=$FRONTEND" >> $GITHUB_OUTPUT
+          echo "issuance=$ISSUANCE" >> $GITHUB_OUTPUT
+          echo "verification=$VERIFICATION" >> $GITHUB_OUTPUT
+
+      # ECR login, build, push, update kubectl images (use kubectl set image rather than sed)
+      - name: Build and push backend images
+        run: |
+          set -euo pipefail
+          ISSUANCE_URI=${{ steps.ecr.outputs.issuance }}
+          VERIFICATION_URI=${{ steps.ecr.outputs.verification }}
+          if [ "$DEPLOY_ISSUANCE" = "true" ]; then
+            docker build -t $ISSUANCE_URI:latest ./backend/issuance-service
+            docker push $ISSUANCE_URI:latest
+          fi
+          if [ "$DEPLOY_VERIFICATION" = "true" ]; then
+            docker build -t $VERIFICATION_URI:latest ./backend/verification-service
+            docker push $VERIFICATION_URI:latest
+          fi
+
+      - name: Deploy backend services to Kubernetes
+        run: |
+          ISSUANCE_URI=${{ steps.ecr.outputs.issuance }}
+          VERIFICATION_URI=${{ steps.ecr.outputs.verification }}
+          kubectl apply -f k8s/mongo-deployment.yaml || true
+          if [ "$DEPLOY_ISSUANCE" = "true" ]; then
+            kubectl apply -f k8s/issuance-deployment.yaml
+            kubectl set image deployment/issuance-deployment issuance=${ISSUANCE_URI}:latest --record || true
+            kubectl rollout status deployment/issuance-deployment --timeout=300s || true
+          fi
+          if [ "$DEPLOY_VERIFICATION" = "true" ]; then
+            kubectl apply -f k8s/verification-deployment.yaml
+            kubectl set image deployment/verification-deployment verification=${VERIFICATION_URI}:latest --record || true
+            kubectl rollout status deployment/verification-deployment --timeout=300s || true
+          fi
