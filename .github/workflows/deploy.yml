@@ -3,15 +3,15 @@ name: Deploy to EKS
 on:
   workflow_dispatch:
     inputs:
-      aws-region:
+      aws_region:
         description: AWS region
         required: true
         default: us-east-1
-      cluster-name:
+      cluster_name:
         description: EKS cluster name
         required: true
         default: zupple-eks
-      node-instance-type:
+      node_instance_type:
         description: Node instance type
         required: true
         default: t3.medium
@@ -23,8 +23,8 @@ jobs:
       id-token: write
       contents: read
     env:
-      AWS_REGION: ${{ github.event.inputs["aws-region"] }}
-      CLUSTER_NAME: ${{ github.event.inputs["cluster-name"] }}
+      AWS_REGION: ${{ github.event.inputs.aws_region }}
+      CLUSTER_NAME: ${{ github.event.inputs.cluster_name }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -55,7 +55,7 @@ jobs:
             --parameter-overrides \
               ClusterName=${CLUSTER_NAME} \
               KubernetesVersion=1.29 \
-              NodeInstanceType=${{ github.event.inputs["node-instance-type"] }}
+              NodeInstanceType=${{ github.event.inputs.node_instance_type }}
 
       - name: Fetch ECR repo URIs
         id: ecr
