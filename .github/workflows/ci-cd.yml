@@ -1,6 +1,52 @@
-git init
-git add .
-git commit -m "adding kube credential project"
-git branch -M main
-git remote add origin https://github.com/Pursharthzutshi/kube-credential.git
-git push -u origin main
+name: CI/CD Pipeline for Kube Credential Project
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Build frontend
+        working-directory: ./frontend
+        run: |
+          npm install
+          npm run build
+
+      - name: Build issuance service
+        working-directory: ./backend/issuance-service
+        run: |
+          npm install
+
+      - name: Build verification service
+        working-directory: ./backend/verification-service
+        run: |
+          npm install
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and push Docker images
+        run: |
+          docker build -t ${{ secrets.DOCKER_USERNAME }}/frontend:latest ./frontend
+          docker push ${{ secrets.DOCKER_USERNAME }}/frontend:latest
+
+          docker build -t ${{ secrets.DOCKER_USERNAME }}/issuance-service:latest ./backend/issuance-service
+          docker push ${{ secrets.DOCKER_USERNAME }}/issuance-service:latest
+
+          docker build -t ${{ secrets.DOCKER_USERNAME }}/verification-service:latest ./backend/verification-service
+          docker push ${{ secrets.DOCKER_USERNAME }}/verification-service:latest
