@@ -3,42 +3,42 @@ name: Deploy to EKS
 on:
   workflow_dispatch:
     inputs:
-      aws-region:
+      aws_region:
         description: AWS region
         required: true
         default: us-east-1
-      cluster-name:
+      cluster_name:
         description: EKS cluster name
         required: true
         default: zupple-eks
-      node-instance-type:
+      node_instance_type:
         description: Node instance type
         required: true
         default: t3.medium
-      deploy-frontend:
+      deploy_frontend:
         description: Deploy frontend component
         required: true
         default: 'false'
         type: choice
         options: ['true','false']
-      deploy-issuance:
+      deploy_issuance:
         description: Deploy issuance backend
         required: true
         default: 'true'
         type: choice
         options: ['true','false']
-      deploy-verification:
+      deploy_verification:
         description: Deploy verification backend
         required: true
         default: 'true'
         type: choice
         options: ['true','false']
       # NEW: Allow configuring backend URLs for frontend
-      issuance-url:
+      issuance_url:
         description: Issuance backend URL (for frontend build)
         required: false
         default: ''
-      verification-url:
+      verification_url:
         description: Verification backend URL (for frontend build)
         required: false
         default: ''
@@ -50,11 +50,11 @@ jobs:
       id-token: write
       contents: read
     env:
-      AWS_REGION: ${{ github.event.inputs.aws-region }}
-      CLUSTER_NAME: ${{ github.event.inputs.cluster-name }}
-      DEPLOY_FRONTEND: ${{ github.event.inputs.deploy-frontend }}
-      DEPLOY_ISSUANCE: ${{ github.event.inputs.deploy-issuance }}
-      DEPLOY_VERIFICATION: ${{ github.event.inputs.deploy-verification }}
+      AWS_REGION: ${{ github.event.inputs.aws_region }}
+      CLUSTER_NAME: ${{ github.event.inputs.cluster_name }}
+      DEPLOY_FRONTEND: ${{ github.event.inputs.deploy_frontend }}
+      DEPLOY_ISSUANCE: ${{ github.event.inputs.deploy_issuance }}
+      DEPLOY_VERIFICATION: ${{ github.event.inputs.deploy_verification }}
 
     steps:
       - name: Checkout
@@ -90,7 +90,7 @@ jobs:
               --parameter-overrides \
                 ClusterName=${CLUSTER_NAME} \
                 KubernetesVersion=1.29 \
-                NodeInstanceType=${{ github.event.inputs.node-instance-type }} || echo "CloudFormation deploy returned non-zero"
+                NodeInstanceType=${{ github.event.inputs.node_instance_type }} || echo "CloudFormation deploy returned non-zero"
           elif aws cloudformation validate-template --template-body file://infra/eks-stack.yaml >/dev/null 2>&1; then
             echo "Stack $STACK_NAME does not exist. Attempting to create..."
             aws cloudformation deploy \
@@ -100,7 +100,7 @@ jobs:
               --parameter-overrides \
                 ClusterName=${CLUSTER_NAME} \
                 KubernetesVersion=1.29 \
-                NodeInstanceType=${{ github.event.inputs.node-instance-type }} || echo "CloudFormation deploy returned non-zero"
+                NodeInstanceType=${{ github.event.inputs.node_instance_type }} || echo "CloudFormation deploy returned non-zero"
           else
             echo "CloudFormation template validation failed or insufficient CFN perms. Will fallback to direct ECR creation later."
           fi
@@ -150,6 +150,10 @@ jobs:
           if [ "${DEPLOY_VERIFICATION}" = "true" ]; then REPOS+=("$VERIFICATION_URI"); fi
 
           for URI in "${REPOS[@]}"; do
+            if [ -z "${URI}" ]; then
+              echo "Skipping empty repo URI (possible missing CFN output)"
+              continue
+            fi
             REPO_NAME=$(echo "$URI" | cut -d'/' -f2)
             echo "Processing repo: $REPO_NAME"
             if aws ecr describe-repositories --repository-names "$REPO_NAME" --region $AWS_REGION >/dev/null 2>&1; then
@@ -200,6 +204,10 @@ jobs:
           if [ "$DEPLOY_VERIFICATION" = "true" ]; then REPO_URIS+=("$VERIFICATION_URI"); fi
 
           for REPO_URI in "${REPO_URIS[@]}"; do
+            if [ -z "${REPO_URI}" ]; then
+              echo "Skipping empty REPO_URI"
+              continue
+            fi
             REPO_NAME=$(echo "$REPO_URI" | cut -d'/' -f2)
             if aws ecr describe-repositories --repository-names "$REPO_NAME" --region $AWS_REGION >/dev/null 2>&1; then
               echo "OK: Found repository $REPO_NAME"
@@ -220,7 +228,7 @@ jobs:
             echo "Please create the EKS cluster manually or request CloudFormation permissions."
             echo ""
             echo "To create manually (example):"
-            echo "eksctl create cluster --name $CLUSTER_NAME --region $AWS_REGION --node-type ${{ github.event.inputs.node-instance-type }} --nodes 2"
+            echo "eksctl create cluster --name $CLUSTER_NAME --region $AWS_REGION --node-type ${{ github.event.inputs.node_instance_type }} --nodes 2"
             exit 1
           fi
 
@@ -293,8 +301,8 @@ jobs:
           echo "Waiting for LoadBalancer external IPs..."
           sleep 30
 
-          ISSUANCE_URL="${{ github.event.inputs.issuance-url }}"
-          VERIFICATION_URL="${{ github.event.inputs.verification-url }}"
+          ISSUANCE_URL="${{ github.event.inputs.issuance_url }}"
+          VERIFICATION_URL="${{ github.event.inputs.verification_url }}"
 
           # If URLs not provided, try to get from LoadBalancer
           if [ -z "$ISSUANCE_URL" ] && [ "$DEPLOY_ISSUANCE" = "true" ]; then
