@@ -23,8 +23,8 @@ jobs:
       id-token: write
       contents: read
     env:
-      AWS_REGION: ${{ github.event.inputs["aws-region"] }}
-      CLUSTER_NAME: ${{ github.event.inputs["cluster-name"] }}
+      AWS_REGION: ${{ github.event.inputs.aws-region }}
+      CLUSTER_NAME: ${{ github.event.inputs.cluster-name }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -55,7 +55,7 @@ jobs:
             --parameter-overrides \
               ClusterName=${CLUSTER_NAME} \
               KubernetesVersion=1.29 \
-              NodeInstanceType=${{ github.event.inputs["node-instance-type"] }}
+              NodeInstanceType=${{ github.event.inputs.node-instance-type }}
 
       - name: Fetch ECR repo URIs
         id: ecr
