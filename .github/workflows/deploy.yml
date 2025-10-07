@@ -1,0 +1,128 @@
+name: Deploy to EKS
+
+on:
+  workflow_dispatch:
+    inputs:
+      aws-region:
+        description: AWS region
+        required: true
+        default: us-east-1
+      cluster-name:
+        description: EKS cluster name
+        required: true
+        default: zupple-eks
+      node-instance-type:
+        description: Node instance type
+        required: true
+        default: t3.medium
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      AWS_REGION: ${{ github.event.inputs["aws-region"] }}
+      CLUSTER_NAME: ${{ github.event.inputs["cluster-name"] }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+          curl -sSLo kubectl https://s3.us-west-2.amazonaws.com/amazon-eks/1.29.0/2024-08-12/bin/linux/amd64/kubectl
+          chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+          curl -sSLo aws-iam-authenticator https://github.com/kubernetes-sigs/aws-iam-authenticator/releases/download/v0.6.22/aws-iam-authenticator_0.6.22_linux_amd64
+          chmod +x aws-iam-authenticator && sudo mv aws-iam-authenticator /usr/local/bin/
+
+      - name: Create/Update CloudFormation stack (EKS + ECR)
+        run: |
+          STACK_NAME=${CLUSTER_NAME}-stack
+          aws cloudformation deploy \
+            --template-file infra/eks-stack.yaml \
+            --stack-name $STACK_NAME \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --parameter-overrides \
+              ClusterName=${CLUSTER_NAME} \
+              KubernetesVersion=1.29 \
+              NodeInstanceType=${{ github.event.inputs["node-instance-type"] }}
+
+      - name: Fetch ECR repo URIs
+        id: ecr
+        run: |
+          STACK_NAME=${CLUSTER_NAME}-stack
+          FRONTEND=$(aws cloudformation describe-stacks --stack-name $STACK_NAME \
+            --query 'Stacks[0].Outputs[?OutputKey==`FrontendEcrUri`].OutputValue' --output text)
+          ISSUANCE=$(aws cloudformation describe-stacks --stack-name $STACK_NAME \
+            --query 'Stacks[0].Outputs[?OutputKey==`IssuanceEcrUri`].OutputValue' --output text)
+          VERIFICATION=$(aws cloudformation describe-stacks --stack-name $STACK_NAME \
+            --query 'Stacks[0].Outputs[?OutputKey==`VerificationEcrUri`].OutputValue' --output text)
+          echo "frontend=$FRONTEND" >> $GITHUB_OUTPUT
+          echo "issuance=$ISSUANCE" >> $GITHUB_OUTPUT
+          echo "verification=$VERIFICATION" >> $GITHUB_OUTPUT
+
+      - name: ECR Login
+        run: aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $(echo "${{ steps.ecr.outputs.frontend }}" | cut -d'/' -f1)
+
+      - name: Build and push images
+        run: |
+          FRONTEND_URI=${{ steps.ecr.outputs.frontend }}
+          ISSUANCE_URI=${{ steps.ecr.outputs.issuance }}
+          VERIFICATION_URI=${{ steps.ecr.outputs.verification }}
+
+          # Build frontend with Vite envs pointing at in-cluster services
+          docker build \
+            --build-arg VITE_ISSUANCE_URL=http://issuance-service:4001 \
+            --build-arg VITE_VERIFY_URL=http://verification-service:4002 \
+            -t $FRONTEND_URI:latest ./frontend
+          docker push $FRONTEND_URI:latest
+
+          docker build -t $ISSUANCE_URI:latest ./backend/issuance-service
+          docker push $ISSUANCE_URI:latest
+
+          docker build -t $VERIFICATION_URI:latest ./backend/verification-service
+          docker push $VERIFICATION_URI:latest
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name $CLUSTER_NAME --region $AWS_REGION
+
+      - name: Wait for nodegroup to be ready
+        run: |
+          for i in {1..30}; do
+            READY_NODES=$(kubectl get nodes --no-headers | grep -c ' Ready ' || true)
+            if [ "$READY_NODES" -ge 1 ]; then
+              echo "Nodes are ready"
+              break
+            fi
+            echo "Waiting for nodes... ($i)"
+            sleep 20
+          done
+
+      - name: Apply Kubernetes manifests (with image substitution)
+        run: |
+          FRONTEND_URI=${{ steps.ecr.outputs.frontend }}
+          ISSUANCE_URI=${{ steps.ecr.outputs.issuance }}
+          VERIFICATION_URI=${{ steps.ecr.outputs.verification }}
+
+          sed "s#yourdockerhub/kube-frontend:latest#$FRONTEND_URI:latest#g" k8s/frontend-deployment.yaml > /tmp/frontend.yaml
+          sed "s#yourdockerhub/issuance-service:latest#$ISSUANCE_URI:latest#g" k8s/issuance-deployment.yaml > /tmp/issuance.yaml
+          sed "s#yourdockerhub/verification-service:latest#$VERIFICATION_URI:latest#g" k8s/verification-deployment.yaml > /tmp/verification.yaml
+
+          kubectl apply -f k8s/mongo-deployment.yaml
+          kubectl apply -f /tmp/issuance.yaml
+          kubectl apply -f /tmp/verification.yaml
+          kubectl apply -f /tmp/frontend.yaml
+
+      - name: Show services
+        run: kubectl get svc -o wide
+
