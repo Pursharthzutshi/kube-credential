@@ -49,7 +49,7 @@ jobs:
         run: |
           STACK_NAME=${CLUSTER_NAME}-stack
           
-          # Check if stack exists and if we have permission to describe it
+          # Test if we have basic CloudFormation permissions
           if aws cloudformation describe-stacks --stack-name $STACK_NAME >/dev/null 2>&1; then
             echo "Stack $STACK_NAME exists, updating..."
             aws cloudformation deploy \
@@ -60,8 +60,8 @@ jobs:
                 ClusterName=${CLUSTER_NAME} \
                 KubernetesVersion=1.29 \
                 NodeInstanceType=${{ github.event.inputs.node-instance-type }}
-          else
-            echo "Stack $STACK_NAME does not exist or no describe permission. Attempting to create..."
+          elif aws cloudformation validate-template --template-body file://infra/eks-stack.yaml >/dev/null 2>&1; then
+            echo "Stack $STACK_NAME does not exist. Attempting to create..."
             aws cloudformation deploy \
               --template-file infra/eks-stack.yaml \
               --stack-name $STACK_NAME \
@@ -70,6 +70,13 @@ jobs:
                 ClusterName=${CLUSTER_NAME} \
                 KubernetesVersion=1.29 \
                 NodeInstanceType=${{ github.event.inputs.node-instance-type }}
+          else
+            echo "CloudFormation permissions insufficient. Creating ECR repositories directly..."
+            # Create ECR repositories directly without CloudFormation
+            aws ecr create-repository --repository-name ${CLUSTER_NAME}-frontend --region $AWS_REGION 2>/dev/null || echo "Frontend repo already exists"
+            aws ecr create-repository --repository-name ${CLUSTER_NAME}-issuance --region $AWS_REGION 2>/dev/null || echo "Issuance repo already exists"
+            aws ecr create-repository --repository-name ${CLUSTER_NAME}-verification --region $AWS_REGION 2>/dev/null || echo "Verification repo already exists"
+            echo "ECR repositories created. EKS cluster must be created manually or with proper CloudFormation permissions."
           fi
 
       - name: Fetch ECR repo URIs
@@ -121,7 +128,19 @@ jobs:
           docker push $VERIFICATION_URI:latest
 
       - name: Update kubeconfig
-        run: aws eks update-kubeconfig --name $CLUSTER_NAME --region $AWS_REGION
+        run: |
+          # Check if EKS cluster exists
+          if aws eks describe-cluster --name $CLUSTER_NAME --region $AWS_REGION >/dev/null 2>&1; then
+            echo "EKS cluster $CLUSTER_NAME exists, updating kubeconfig..."
+            aws eks update-kubeconfig --name $CLUSTER_NAME --region $AWS_REGION
+          else
+            echo "ERROR: EKS cluster $CLUSTER_NAME does not exist!"
+            echo "Please create the EKS cluster manually or request CloudFormation permissions."
+            echo ""
+            echo "To create manually:"
+            echo "eksctl create cluster --name $CLUSTER_NAME --region $AWS_REGION --node-type ${{ github.event.inputs.node-instance-type }} --nodes 2"
+            exit 1
+          fi
 
       - name: Wait for nodegroup to be ready
         run: |

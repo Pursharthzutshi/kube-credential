@@ -21,7 +21,12 @@ The following IAM policy should be attached to the `pursharthzutshi` user:
                 "cloudformation:CreateStack",
                 "cloudformation:UpdateStack",
                 "cloudformation:DeleteStack",
-                "cloudformation:ValidateTemplate"
+                "cloudformation:ValidateTemplate",
+                "cloudformation:CreateChangeSet",
+                "cloudformation:DeleteChangeSet",
+                "cloudformation:DescribeChangeSet",
+                "cloudformation:ExecuteChangeSet",
+                "cloudformation:ListChangeSets"
             ],
             "Resource": "*"
         },
