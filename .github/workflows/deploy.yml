@@ -15,6 +15,24 @@ on:
         description: Node instance type
         required: true
         default: t3.medium
+      deploy-frontend:
+        description: Deploy frontend component
+        required: true
+        default: 'false'
+        type: choice
+        options: ['true','false']
+      deploy-issuance:
+        description: Deploy issuance backend
+        required: true
+        default: 'true'
+        type: choice
+        options: ['true','false']
+      deploy-verification:
+        description: Deploy verification backend
+        required: true
+        default: 'true'
+        type: choice
+        options: ['true','false']
 
 jobs:
   deploy:
@@ -25,6 +43,9 @@ jobs:
     env:
       AWS_REGION: ${{ github.event.inputs.aws-region }}
       CLUSTER_NAME: ${{ github.event.inputs.cluster-name }}
+      DEPLOY_FRONTEND: ${{ github.event.inputs.deploy-frontend }}
+      DEPLOY_ISSUANCE: ${{ github.event.inputs.deploy-issuance }}
+      DEPLOY_VERIFICATION: ${{ github.event.inputs.deploy-verification }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -118,7 +139,12 @@ jobs:
           ISSUANCE_URI=${{ steps.ecr.outputs.issuance }}
           VERIFICATION_URI=${{ steps.ecr.outputs.verification }}
 
-          for REPO_URI in "$FRONTEND_URI" "$ISSUANCE_URI" "$VERIFICATION_URI"; do
+          REPO_URIS=()
+          if [ "$DEPLOY_FRONTEND" = "true" ]; then REPO_URIS+=("$FRONTEND_URI"); fi
+          if [ "$DEPLOY_ISSUANCE" = "true" ]; then REPO_URIS+=("$ISSUANCE_URI"); fi
+          if [ "$DEPLOY_VERIFICATION" = "true" ]; then REPO_URIS+=("$VERIFICATION_URI"); fi
+
+          for REPO_URI in "${REPO_URIS[@]}"; do
             REPO_NAME=$(echo "$REPO_URI" | cut -d'/' -f2)
 
             if ! aws ecr describe-repositories --repository-names "$REPO_NAME" --region $AWS_REGION >/dev/null 2>&1; then
@@ -157,15 +183,20 @@ jobs:
           ISSUANCE_URI=${{ steps.ecr.outputs.issuance }}
           VERIFICATION_URI=${{ steps.ecr.outputs.verification }}
 
-          echo "Resolved URIs:"
-          echo "  FRONTEND_URI=$FRONTEND_URI"
-          echo "  ISSUANCE_URI=$ISSUANCE_URI"
-          echo "  VERIFICATION_URI=$VERIFICATION_URI"
+          echo "Resolved URIs (considering toggles):"
+          if [ "$DEPLOY_FRONTEND" = "true" ]; then echo "  FRONTEND_URI=$FRONTEND_URI"; else echo "  FRONTEND skipped"; fi
+          if [ "$DEPLOY_ISSUANCE" = "true" ]; then echo "  ISSUANCE_URI=$ISSUANCE_URI"; else echo "  ISSUANCE skipped"; fi
+          if [ "$DEPLOY_VERIFICATION" = "true" ]; then echo "  VERIFICATION_URI=$VERIFICATION_URI"; else echo "  VERIFICATION skipped"; fi
 
           echo "Listing ECR repositories in $AWS_REGION..."
           aws ecr describe-repositories --region $AWS_REGION --query 'repositories[].repositoryName' --output text || true
 
-          for REPO_URI in "$FRONTEND_URI" "$ISSUANCE_URI" "$VERIFICATION_URI"; do
+          REPO_URIS=()
+          if [ "$DEPLOY_FRONTEND" = "true" ]; then REPO_URIS+=("$FRONTEND_URI"); fi
+          if [ "$DEPLOY_ISSUANCE" = "true" ]; then REPO_URIS+=("$ISSUANCE_URI"); fi
+          if [ "$DEPLOY_VERIFICATION" = "true" ]; then REPO_URIS+=("$VERIFICATION_URI"); fi
+
+          for REPO_URI in "${REPO_URIS[@]}"; do
             REPO_NAME=$(echo "$REPO_URI" | cut -d'/' -f2)
             if aws ecr describe-repositories --repository-names "$REPO_NAME" --region $AWS_REGION >/dev/null 2>&1; then
               echo "OK: Found repository $REPO_NAME"
@@ -181,17 +212,29 @@ jobs:
           ISSUANCE_URI=${{ steps.ecr.outputs.issuance }}
           VERIFICATION_URI=${{ steps.ecr.outputs.verification }}
 
-          docker build \
-            --build-arg VITE_ISSUANCE_URL=http://issuance-service:4001 \
-            --build-arg VITE_VERIFY_URL=http://verification-service:4002 \
-            -t $FRONTEND_URI:latest ./frontend
-          docker push $FRONTEND_URI:latest
+          if [ "$DEPLOY_FRONTEND" = "true" ]; then
+            docker build \
+              --build-arg VITE_ISSUANCE_URL=http://issuance-service:4001 \
+              --build-arg VITE_VERIFY_URL=http://verification-service:4002 \
+              -t $FRONTEND_URI:latest ./frontend
+            docker push $FRONTEND_URI:latest
+          else
+            echo "Skipping frontend build/push"
+          fi
 
-          docker build -t $ISSUANCE_URI:latest ./backend/issuance-service
-          docker push $ISSUANCE_URI:latest
+          if [ "$DEPLOY_ISSUANCE" = "true" ]; then
+            docker build -t $ISSUANCE_URI:latest ./backend/issuance-service
+            docker push $ISSUANCE_URI:latest
+          else
+            echo "Skipping issuance-service build/push"
+          fi
 
-          docker build -t $VERIFICATION_URI:latest ./backend/verification-service
-          docker push $VERIFICATION_URI:latest
+          if [ "$DEPLOY_VERIFICATION" = "true" ]; then
+            docker build -t $VERIFICATION_URI:latest ./backend/verification-service
+            docker push $VERIFICATION_URI:latest
+          else
+            echo "Skipping verification-service build/push"
+          fi
 
       - name: Update kubeconfig
         run: |
@@ -226,14 +269,20 @@ jobs:
           ISSUANCE_URI=${{ steps.ecr.outputs.issuance }}
           VERIFICATION_URI=${{ steps.ecr.outputs.verification }}
 
-          sed "s#yourdockerhub/kube-frontend:latest#$FRONTEND_URI:latest#g" k8s/frontend-deployment.yaml > /tmp/frontend.yaml
-          sed "s#yourdockerhub/issuance-service:latest#$ISSUANCE_URI:latest#g" k8s/issuance-deployment.yaml > /tmp/issuance.yaml
-          sed "s#yourdockerhub/verification-service:latest#$VERIFICATION_URI:latest#g" k8s/verification-deployment.yaml > /tmp/verification.yaml
+          if [ "$DEPLOY_FRONTEND" = "true" ]; then
+            sed "s#yourdockerhub/kube-frontend:latest#$FRONTEND_URI:latest#g" k8s/frontend-deployment.yaml > /tmp/frontend.yaml
+          fi
+          if [ "$DEPLOY_ISSUANCE" = "true" ]; then
+            sed "s#yourdockerhub/issuance-service:latest#$ISSUANCE_URI:latest#g" k8s/issuance-deployment.yaml > /tmp/issuance.yaml
+          fi
+          if [ "$DEPLOY_VERIFICATION" = "true" ]; then
+            sed "s#yourdockerhub/verification-service:latest#$VERIFICATION_URI:latest#g" k8s/verification-deployment.yaml > /tmp/verification.yaml
+          fi
 
           kubectl apply -f k8s/mongo-deployment.yaml
-          kubectl apply -f /tmp/issuance.yaml
-          kubectl apply -f /tmp/verification.yaml
-          kubectl apply -f /tmp/frontend.yaml
+          if [ "$DEPLOY_ISSUANCE" = "true" ]; then kubectl apply -f /tmp/issuance.yaml; else echo "Skipping issuance k8s apply"; fi
+          if [ "$DEPLOY_VERIFICATION" = "true" ]; then kubectl apply -f /tmp/verification.yaml; else echo "Skipping verification k8s apply"; fi
+          if [ "$DEPLOY_FRONTEND" = "true" ]; then kubectl apply -f /tmp/frontend.yaml; else echo "Skipping frontend k8s apply"; fi
 
       - name: Show services
         run: kubectl get svc -o wide
