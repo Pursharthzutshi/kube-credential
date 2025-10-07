@@ -1,0 +1,6 @@
+git init
+git add .
+git commit -m "adding kube credential project"
+git branch -M main
+git remote add origin https://github.com/Pursharthzutshi/kube-credential.git
+git push -u origin main

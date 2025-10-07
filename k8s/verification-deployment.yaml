@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: verification-deployment
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: verification
+  template:
+    metadata:
+      labels:
+        app: verification
+    spec:
+      containers:
+        - name: verification
+          image: yourdockerhub/verification-service:latest
+          ports:
+            - containerPort: 4002
+          env:
+            - name: WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: MONGO_URI
+              value: mongodb://mongo:27017/verification
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: verification-service
+spec:
+  selector:
+    app: verification
+  ports:
+    - port: 4002
+      targetPort: 4002
+  type: ClusterIP
