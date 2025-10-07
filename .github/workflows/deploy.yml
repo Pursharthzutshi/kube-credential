@@ -80,7 +80,6 @@ jobs:
           ISSUANCE_URI=${{ steps.ecr.outputs.issuance }}
           VERIFICATION_URI=${{ steps.ecr.outputs.verification }}
 
-          # Build frontend with Vite envs pointing at in-cluster services
           docker build \
             --build-arg VITE_ISSUANCE_URL=http://issuance-service:4001 \
             --build-arg VITE_VERIFY_URL=http://verification-service:4002 \
@@ -125,4 +124,3 @@ jobs:
 
       - name: Show services
         run: kubectl get svc -o wide
-
