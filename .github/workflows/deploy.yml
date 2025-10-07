@@ -15,24 +15,6 @@ on:
         description: Node instance type
         required: true
         default: t3.medium
-      deploy-frontend:
-        description: Deploy frontend component
-        required: true
-        default: 'false'
-        type: choice
-        options: ['true','false']
-      deploy-issuance:
-        description: Deploy issuance backend
-        required: true
-        default: 'true'
-        type: choice
-        options: ['true','false']
-      deploy-verification:
-        description: Deploy verification backend
-        required: true
-        default: 'true'
-        type: choice
-        options: ['true','false']
 
 jobs:
   deploy:
@@ -43,9 +25,6 @@ jobs:
     env:
       AWS_REGION: ${{ github.event.inputs.aws-region }}
       CLUSTER_NAME: ${{ github.event.inputs.cluster-name }}
-      DEPLOY_FRONTEND: ${{ github.event.inputs.deploy-frontend }}
-      DEPLOY_ISSUANCE: ${{ github.event.inputs.deploy-issuance }}
-      DEPLOY_VERIFICATION: ${{ github.event.inputs.deploy-verification }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -127,84 +106,8 @@ jobs:
           echo "issuance=$ISSUANCE" >> $GITHUB_OUTPUT
           echo "verification=$VERIFICATION" >> $GITHUB_OUTPUT
 
-      - name: Ensure ECR repositories exist
-        run: |
-          set -euo pipefail
-
-          echo "AWS region: $AWS_REGION"
-          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          echo "AWS account: $AWS_ACCOUNT_ID"
-
-          FRONTEND_URI=${{ steps.ecr.outputs.frontend }}
-          ISSUANCE_URI=${{ steps.ecr.outputs.issuance }}
-          VERIFICATION_URI=${{ steps.ecr.outputs.verification }}
-
-          REPO_URIS=()
-          if [ "$DEPLOY_FRONTEND" = "true" ]; then REPO_URIS+=("$FRONTEND_URI"); fi
-          if [ "$DEPLOY_ISSUANCE" = "true" ]; then REPO_URIS+=("$ISSUANCE_URI"); fi
-          if [ "$DEPLOY_VERIFICATION" = "true" ]; then REPO_URIS+=("$VERIFICATION_URI"); fi
-
-          for REPO_URI in "${REPO_URIS[@]}"; do
-            REPO_NAME=$(echo "$REPO_URI" | cut -d'/' -f2)
-
-            if ! aws ecr describe-repositories --repository-names "$REPO_NAME" --region $AWS_REGION >/dev/null 2>&1; then
-              echo "Creating ECR repository: $REPO_NAME"
-              if ! aws ecr create-repository --repository-name "$REPO_NAME" --region $AWS_REGION >/dev/null 2>&1; then
-                echo "ERROR: Failed to create ECR repository '$REPO_NAME' in $AWS_REGION for account $AWS_ACCOUNT_ID"
-                echo "Please ensure this identity has ecr:CreateRepository and ecr:DescribeRepositories permissions."
-                aws sts get-caller-identity || true
-                exit 1
-              fi
-              # Wait until the repo is visible to avoid eventual consistency issues
-              for i in {1..10}; do
-                if aws ecr describe-repositories --repository-names "$REPO_NAME" --region $AWS_REGION >/dev/null 2>&1; then
-                  echo "Confirmed ECR repository available: $REPO_NAME"
-                  break
-                fi
-                echo "Waiting for ECR repository to become available: $REPO_NAME ($i)"
-                sleep 3
-              done
-            else
-              echo "ECR repository exists: $REPO_NAME"
-            fi
-          done
-
       - name: ECR Login
         run: aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $(echo "${{ steps.ecr.outputs.frontend }}" | cut -d'/' -f1)
-
-      - name: Preflight ECR check (debug)
-        run: |
-          set -euo pipefail
-          echo "AWS region: $AWS_REGION"
-          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          echo "AWS account: $AWS_ACCOUNT_ID"
-
-          FRONTEND_URI=${{ steps.ecr.outputs.frontend }}
-          ISSUANCE_URI=${{ steps.ecr.outputs.issuance }}
-          VERIFICATION_URI=${{ steps.ecr.outputs.verification }}
-
-          echo "Resolved URIs (considering toggles):"
-          if [ "$DEPLOY_FRONTEND" = "true" ]; then echo "  FRONTEND_URI=$FRONTEND_URI"; else echo "  FRONTEND skipped"; fi
-          if [ "$DEPLOY_ISSUANCE" = "true" ]; then echo "  ISSUANCE_URI=$ISSUANCE_URI"; else echo "  ISSUANCE skipped"; fi
-          if [ "$DEPLOY_VERIFICATION" = "true" ]; then echo "  VERIFICATION_URI=$VERIFICATION_URI"; else echo "  VERIFICATION skipped"; fi
-
-          echo "Listing ECR repositories in $AWS_REGION..."
-          aws ecr describe-repositories --region $AWS_REGION --query 'repositories[].repositoryName' --output text || true
-
-          REPO_URIS=()
-          if [ "$DEPLOY_FRONTEND" = "true" ]; then REPO_URIS+=("$FRONTEND_URI"); fi
-          if [ "$DEPLOY_ISSUANCE" = "true" ]; then REPO_URIS+=("$ISSUANCE_URI"); fi
-          if [ "$DEPLOY_VERIFICATION" = "true" ]; then REPO_URIS+=("$VERIFICATION_URI"); fi
-
-          for REPO_URI in "${REPO_URIS[@]}"; do
-            REPO_NAME=$(echo "$REPO_URI" | cut -d'/' -f2)
-            if aws ecr describe-repositories --repository-names "$REPO_NAME" --region $AWS_REGION >/dev/null 2>&1; then
-              echo "OK: Found repository $REPO_NAME"
-            else
-              echo "ERROR: Missing repository $REPO_NAME in $AWS_REGION for account $AWS_ACCOUNT_ID"
-              exit 1
-            fi
-          done
 
       - name: Build and push images
         run: |
@@ -212,29 +115,17 @@ jobs:
           ISSUANCE_URI=${{ steps.ecr.outputs.issuance }}
           VERIFICATION_URI=${{ steps.ecr.outputs.verification }}
 
-          if [ "$DEPLOY_FRONTEND" = "true" ]; then
-            docker build \
-              --build-arg VITE_ISSUANCE_URL=http://issuance-service:4001 \
-              --build-arg VITE_VERIFY_URL=http://verification-service:4002 \
-              -t $FRONTEND_URI:latest ./frontend
-            docker push $FRONTEND_URI:latest
-          else
-            echo "Skipping frontend build/push"
-          fi
+          docker build \
+            --build-arg VITE_ISSUANCE_URL=http://issuance-service:4001 \
+            --build-arg VITE_VERIFY_URL=http://verification-service:4002 \
+            -t $FRONTEND_URI:latest ./frontend
+          docker push $FRONTEND_URI:latest
 
-          if [ "$DEPLOY_ISSUANCE" = "true" ]; then
-            docker build -t $ISSUANCE_URI:latest ./backend/issuance-service
-            docker push $ISSUANCE_URI:latest
-          else
-            echo "Skipping issuance-service build/push"
-          fi
+          docker build -t $ISSUANCE_URI:latest ./backend/issuance-service
+          docker push $ISSUANCE_URI:latest
 
-          if [ "$DEPLOY_VERIFICATION" = "true" ]; then
-            docker build -t $VERIFICATION_URI:latest ./backend/verification-service
-            docker push $VERIFICATION_URI:latest
-          else
-            echo "Skipping verification-service build/push"
-          fi
+          docker build -t $VERIFICATION_URI:latest ./backend/verification-service
+          docker push $VERIFICATION_URI:latest
 
       - name: Update kubeconfig
         run: |
@@ -269,20 +160,14 @@ jobs:
           ISSUANCE_URI=${{ steps.ecr.outputs.issuance }}
           VERIFICATION_URI=${{ steps.ecr.outputs.verification }}
 
-          if [ "$DEPLOY_FRONTEND" = "true" ]; then
-            sed "s#yourdockerhub/kube-frontend:latest#$FRONTEND_URI:latest#g" k8s/frontend-deployment.yaml > /tmp/frontend.yaml
-          fi
-          if [ "$DEPLOY_ISSUANCE" = "true" ]; then
-            sed "s#yourdockerhub/issuance-service:latest#$ISSUANCE_URI:latest#g" k8s/issuance-deployment.yaml > /tmp/issuance.yaml
-          fi
-          if [ "$DEPLOY_VERIFICATION" = "true" ]; then
-            sed "s#yourdockerhub/verification-service:latest#$VERIFICATION_URI:latest#g" k8s/verification-deployment.yaml > /tmp/verification.yaml
-          fi
+          sed "s#yourdockerhub/kube-frontend:latest#$FRONTEND_URI:latest#g" k8s/frontend-deployment.yaml > /tmp/frontend.yaml
+          sed "s#yourdockerhub/issuance-service:latest#$ISSUANCE_URI:latest#g" k8s/issuance-deployment.yaml > /tmp/issuance.yaml
+          sed "s#yourdockerhub/verification-service:latest#$VERIFICATION_URI:latest#g" k8s/verification-deployment.yaml > /tmp/verification.yaml
 
           kubectl apply -f k8s/mongo-deployment.yaml
-          if [ "$DEPLOY_ISSUANCE" = "true" ]; then kubectl apply -f /tmp/issuance.yaml; else echo "Skipping issuance k8s apply"; fi
-          if [ "$DEPLOY_VERIFICATION" = "true" ]; then kubectl apply -f /tmp/verification.yaml; else echo "Skipping verification k8s apply"; fi
-          if [ "$DEPLOY_FRONTEND" = "true" ]; then kubectl apply -f /tmp/frontend.yaml; else echo "Skipping frontend k8s apply"; fi
+          kubectl apply -f /tmp/issuance.yaml
+          kubectl apply -f /tmp/verification.yaml
+          kubectl apply -f /tmp/frontend.yaml
 
       - name: Show services
         run: kubectl get svc -o wide
