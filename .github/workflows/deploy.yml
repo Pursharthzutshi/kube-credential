@@ -108,15 +108,36 @@ jobs:
 
       - name: Ensure ECR repositories exist
         run: |
+          set -euo pipefail
+
+          echo "AWS region: $AWS_REGION"
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          echo "AWS account: $AWS_ACCOUNT_ID"
+
           FRONTEND_URI=${{ steps.ecr.outputs.frontend }}
           ISSUANCE_URI=${{ steps.ecr.outputs.issuance }}
           VERIFICATION_URI=${{ steps.ecr.outputs.verification }}
 
           for REPO_URI in "$FRONTEND_URI" "$ISSUANCE_URI" "$VERIFICATION_URI"; do
             REPO_NAME=$(echo "$REPO_URI" | cut -d'/' -f2)
+
             if ! aws ecr describe-repositories --repository-names "$REPO_NAME" --region $AWS_REGION >/dev/null 2>&1; then
               echo "Creating ECR repository: $REPO_NAME"
-              aws ecr create-repository --repository-name "$REPO_NAME" --region $AWS_REGION >/dev/null
+              if ! aws ecr create-repository --repository-name "$REPO_NAME" --region $AWS_REGION >/dev/null 2>&1; then
+                echo "ERROR: Failed to create ECR repository '$REPO_NAME' in $AWS_REGION for account $AWS_ACCOUNT_ID"
+                echo "Please ensure this identity has ecr:CreateRepository and ecr:DescribeRepositories permissions."
+                aws sts get-caller-identity || true
+                exit 1
+              fi
+              # Wait until the repo is visible to avoid eventual consistency issues
+              for i in {1..10}; do
+                if aws ecr describe-repositories --repository-names "$REPO_NAME" --region $AWS_REGION >/dev/null 2>&1; then
+                  echo "Confirmed ECR repository available: $REPO_NAME"
+                  break
+                fi
+                echo "Waiting for ECR repository to become available: $REPO_NAME ($i)"
+                sleep 3
+              done
             else
               echo "ECR repository exists: $REPO_NAME"
             fi
@@ -124,6 +145,35 @@ jobs:
 
       - name: ECR Login
         run: aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $(echo "${{ steps.ecr.outputs.frontend }}" | cut -d'/' -f1)
+
+      - name: Preflight ECR check (debug)
+        run: |
+          set -euo pipefail
+          echo "AWS region: $AWS_REGION"
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          echo "AWS account: $AWS_ACCOUNT_ID"
+
+          FRONTEND_URI=${{ steps.ecr.outputs.frontend }}
+          ISSUANCE_URI=${{ steps.ecr.outputs.issuance }}
+          VERIFICATION_URI=${{ steps.ecr.outputs.verification }}
+
+          echo "Resolved URIs:"
+          echo "  FRONTEND_URI=$FRONTEND_URI"
+          echo "  ISSUANCE_URI=$ISSUANCE_URI"
+          echo "  VERIFICATION_URI=$VERIFICATION_URI"
+
+          echo "Listing ECR repositories in $AWS_REGION..."
+          aws ecr describe-repositories --region $AWS_REGION --query 'repositories[].repositoryName' --output text || true
+
+          for REPO_URI in "$FRONTEND_URI" "$ISSUANCE_URI" "$VERIFICATION_URI"; do
+            REPO_NAME=$(echo "$REPO_URI" | cut -d'/' -f2)
+            if aws ecr describe-repositories --repository-names "$REPO_NAME" --region $AWS_REGION >/dev/null 2>&1; then
+              echo "OK: Found repository $REPO_NAME"
+            else
+              echo "ERROR: Missing repository $REPO_NAME in $AWS_REGION for account $AWS_ACCOUNT_ID"
+              exit 1
+            fi
+          done
 
       - name: Build and push images
         run: |
