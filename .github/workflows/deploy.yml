@@ -46,7 +46,6 @@ jobs:
       DEPLOY_FRONTEND: ${{ github.event.inputs.deploy-frontend }}
       DEPLOY_ISSUANCE: ${{ github.event.inputs.deploy-issuance }}
       DEPLOY_VERIFICATION: ${{ github.event.inputs.deploy-verification }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -58,7 +57,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Install dependencies (kubectl, jq, aws-iam-authenticator)
+      - name: Install dependencies
         run: |
           sudo apt-get update -y
           sudo apt-get install -y jq
@@ -67,12 +66,11 @@ jobs:
           curl -sSLo aws-iam-authenticator https://github.com/kubernetes-sigs/aws-iam-authenticator/releases/download/v0.6.22/aws-iam-authenticator_0.6.22_linux_amd64
           chmod +x aws-iam-authenticator && sudo mv aws-iam-authenticator /usr/local/bin/
 
-      - name: Create/Update CloudFormation stack (EKS + ECR) (best-effort)
-        id: cfn_deploy
+      - name: Create/Update CloudFormation stack (EKS + ECR)
         run: |
           STACK_NAME=${CLUSTER_NAME}-stack
-
-          # If stack exists, deploy update; if not, attempt create via deploy
+          
+          # Test if we have basic CloudFormation permissions
           if aws cloudformation describe-stacks --stack-name $STACK_NAME >/dev/null 2>&1; then
             echo "Stack $STACK_NAME exists, updating..."
             aws cloudformation deploy \
@@ -82,7 +80,7 @@ jobs:
               --parameter-overrides \
                 ClusterName=${CLUSTER_NAME} \
                 KubernetesVersion=1.29 \
-                NodeInstanceType=${{ github.event.inputs.node-instance-type }} || echo "CloudFormation deploy returned non-zero"
+                NodeInstanceType=${{ github.event.inputs.node-instance-type }}
           elif aws cloudformation validate-template --template-body file://infra/eks-stack.yaml >/dev/null 2>&1; then
             echo "Stack $STACK_NAME does not exist. Attempting to create..."
             aws cloudformation deploy \
@@ -92,82 +90,87 @@ jobs:
               --parameter-overrides \
                 ClusterName=${CLUSTER_NAME} \
                 KubernetesVersion=1.29 \
-                NodeInstanceType=${{ github.event.inputs.node-instance-type }} || echo "CloudFormation deploy returned non-zero"
+                NodeInstanceType=${{ github.event.inputs.node-instance-type }}
           else
-            echo "CloudFormation template validation failed or insufficient CFN perms. Will fallback to direct ECR creation later."
+            echo "CloudFormation permissions insufficient. Creating ECR repositories directly..."
+            # Create ECR repositories directly without CloudFormation
+            aws ecr create-repository --repository-name ${CLUSTER_NAME}-frontend --region $AWS_REGION 2>/dev/null || echo "Frontend repo already exists"
+            aws ecr create-repository --repository-name ${CLUSTER_NAME}-issuance --region $AWS_REGION 2>/dev/null || echo "Issuance repo already exists"
+            aws ecr create-repository --repository-name ${CLUSTER_NAME}-verification --region $AWS_REGION 2>/dev/null || echo "Verification repo already exists"
+            echo "ECR repositories created. EKS cluster must be created manually or with proper CloudFormation permissions."
           fi
 
-      - name: Fetch ECR repo URIs (CFN outputs preferred, fallback to convention)
+      - name: Fetch ECR repo URIs
         id: ecr
         run: |
           STACK_NAME=${CLUSTER_NAME}-stack
-          FRONTEND=""
-          ISSUANCE=""
-          VERIFICATION=""
-
+          
+          # Check if we have CloudFormation describe permissions
           if aws cloudformation describe-stacks --stack-name $STACK_NAME >/dev/null 2>&1; then
-            echo "Using CloudFormation outputs for ECR URIs (if present)"
+            echo "Using CloudFormation to get ECR URIs"
             FRONTEND=$(aws cloudformation describe-stacks --stack-name $STACK_NAME \
-              --query 'Stacks[0].Outputs[?OutputKey==`FrontendEcrUri`].OutputValue' --output text 2>/dev/null || echo "")
+              --query 'Stacks[0].Outputs[?OutputKey==`FrontendEcrUri`].OutputValue' --output text)
             ISSUANCE=$(aws cloudformation describe-stacks --stack-name $STACK_NAME \
-              --query 'Stacks[0].Outputs[?OutputKey==`IssuanceEcrUri`].OutputValue' --output text 2>/dev/null || echo "")
+              --query 'Stacks[0].Outputs[?OutputKey==`IssuanceEcrUri`].OutputValue' --output text)
             VERIFICATION=$(aws cloudformation describe-stacks --stack-name $STACK_NAME \
-              --query 'Stacks[0].Outputs[?OutputKey==`VerificationEcrUri`].OutputValue' --output text 2>/dev/null || echo "")
+              --query 'Stacks[0].Outputs[?OutputKey==`VerificationEcrUri`].OutputValue' --output text)
           else
-            echo "CloudFormation describe-stacks failed or not permitted; using fallback URIs."
+            echo "CloudFormation describe permission denied. Using ECR list-repositories as fallback"
+            # Fallback: construct ECR URIs using standard naming convention
+            AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+            FRONTEND="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${CLUSTER_NAME}-frontend"
+            ISSUANCE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${CLUSTER_NAME}-issuance"
+            VERIFICATION="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${CLUSTER_NAME}-verification"
           fi
-
-          # Fallback: construct expected URIs
-          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          [ -z "$FRONTEND" ] && FRONTEND="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${CLUSTER_NAME}-frontend"
-          [ -z "$ISSUANCE" ] && ISSUANCE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${CLUSTER_NAME}-issuance"
-          [ -z "$VERIFICATION" ] && VERIFICATION="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${CLUSTER_NAME}-verification"
-
+          
           echo "frontend=$FRONTEND" >> $GITHUB_OUTPUT
           echo "issuance=$ISSUANCE" >> $GITHUB_OUTPUT
           echo "verification=$VERIFICATION" >> $GITHUB_OUTPUT
 
-      - name: Ensure ECR repositories exist (create if missing + wait)
+      - name: Ensure ECR repositories exist
         run: |
           set -euo pipefail
+
+          echo "AWS region: $AWS_REGION"
           AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          echo "Account: $AWS_ACCOUNT_ID, Region: $AWS_REGION"
+          echo "AWS account: $AWS_ACCOUNT_ID"
 
           FRONTEND_URI=${{ steps.ecr.outputs.frontend }}
           ISSUANCE_URI=${{ steps.ecr.outputs.issuance }}
           VERIFICATION_URI=${{ steps.ecr.outputs.verification }}
 
-          REPOS=()
-          if [ "${DEPLOY_FRONTEND}" = "true" ]; then REPOS+=("$FRONTEND_URI"); fi
-          if [ "${DEPLOY_ISSUANCE}" = "true" ]; then REPOS+=("$ISSUANCE_URI"); fi
-          if [ "${DEPLOY_VERIFICATION}" = "true" ]; then REPOS+=("$VERIFICATION_URI"); fi
+          REPO_URIS=()
+          if [ "$DEPLOY_FRONTEND" = "true" ]; then REPO_URIS+=("$FRONTEND_URI"); fi
+          if [ "$DEPLOY_ISSUANCE" = "true" ]; then REPO_URIS+=("$ISSUANCE_URI"); fi
+          if [ "$DEPLOY_VERIFICATION" = "true" ]; then REPO_URIS+=("$VERIFICATION_URI"); fi
 
-          for URI in "${REPOS[@]}"; do
-            REPO_NAME=$(echo "$URI" | cut -d'/' -f2)
-            echo "Processing repo: $REPO_NAME"
-            if aws ecr describe-repositories --repository-names "$REPO_NAME" --region $AWS_REGION >/dev/null 2>&1; then
-              echo "OK: $REPO_NAME exists"
-            else
-              echo "Creating ECR repo: $REPO_NAME"
-              aws ecr create-repository --repository-name "$REPO_NAME" --region $AWS_REGION || true
-              # wait for visibility
-              for i in {1..12}; do
+          for REPO_URI in "${REPO_URIS[@]}"; do
+            REPO_NAME=$(echo "$REPO_URI" | cut -d'/' -f2)
+
+            if ! aws ecr describe-repositories --repository-names "$REPO_NAME" --region $AWS_REGION >/dev/null 2>&1; then
+              echo "Creating ECR repository: $REPO_NAME"
+              if ! aws ecr create-repository --repository-name "$REPO_NAME" --region $AWS_REGION >/dev/null 2>&1; then
+                echo "ERROR: Failed to create ECR repository '$REPO_NAME' in $AWS_REGION for account $AWS_ACCOUNT_ID"
+                echo "Please ensure this identity has ecr:CreateRepository and ecr:DescribeRepositories permissions."
+                aws sts get-caller-identity || true
+                exit 1
+              fi
+              # Wait until the repo is visible to avoid eventual consistency issues
+              for i in {1..10}; do
                 if aws ecr describe-repositories --repository-names "$REPO_NAME" --region $AWS_REGION >/dev/null 2>&1; then
-                  echo "Confirmed: $REPO_NAME is available"
+                  echo "Confirmed ECR repository available: $REPO_NAME"
                   break
                 fi
-                echo "Waiting for $REPO_NAME to appear ($i/12)"
+                echo "Waiting for ECR repository to become available: $REPO_NAME ($i)"
                 sleep 3
               done
+            else
+              echo "ECR repository exists: $REPO_NAME"
             fi
           done
 
-      - name: ECR Login (robust)
-        run: |
-          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-          echo "Logging in to ECR registry: $REGISTRY"
-          aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $REGISTRY
+      - name: ECR Login
+        run: aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $(echo "${{ steps.ecr.outputs.frontend }}" | cut -d'/' -f1)
 
       - name: Preflight ECR check (debug)
         run: |
@@ -205,13 +208,11 @@ jobs:
 
       - name: Build and push images
         run: |
-          set -euo pipefail
           FRONTEND_URI=${{ steps.ecr.outputs.frontend }}
           ISSUANCE_URI=${{ steps.ecr.outputs.issuance }}
           VERIFICATION_URI=${{ steps.ecr.outputs.verification }}
 
           if [ "$DEPLOY_FRONTEND" = "true" ]; then
-            echo "Building frontend image -> $FRONTEND_URI:latest"
             docker build \
               --build-arg VITE_ISSUANCE_URL=http://issuance-service:4001 \
               --build-arg VITE_VERIFY_URL=http://verification-service:4002 \
@@ -222,7 +223,6 @@ jobs:
           fi
 
           if [ "$DEPLOY_ISSUANCE" = "true" ]; then
-            echo "Building issuance image -> $ISSUANCE_URI:latest"
             docker build -t $ISSUANCE_URI:latest ./backend/issuance-service
             docker push $ISSUANCE_URI:latest
           else
@@ -230,7 +230,6 @@ jobs:
           fi
 
           if [ "$DEPLOY_VERIFICATION" = "true" ]; then
-            echo "Building verification image -> $VERIFICATION_URI:latest"
             docker build -t $VERIFICATION_URI:latest ./backend/verification-service
             docker push $VERIFICATION_URI:latest
           else
@@ -239,6 +238,7 @@ jobs:
 
       - name: Update kubeconfig
         run: |
+          # Check if EKS cluster exists
           if aws eks describe-cluster --name $CLUSTER_NAME --region $AWS_REGION >/dev/null 2>&1; then
             echo "EKS cluster $CLUSTER_NAME exists, updating kubeconfig..."
             aws eks update-kubeconfig --name $CLUSTER_NAME --region $AWS_REGION
@@ -246,7 +246,7 @@ jobs:
             echo "ERROR: EKS cluster $CLUSTER_NAME does not exist!"
             echo "Please create the EKS cluster manually or request CloudFormation permissions."
             echo ""
-            echo "To create manually (example):"
+            echo "To create manually:"
             echo "eksctl create cluster --name $CLUSTER_NAME --region $AWS_REGION --node-type ${{ github.event.inputs.node-instance-type }} --nodes 2"
             exit 1
           fi
@@ -254,12 +254,12 @@ jobs:
       - name: Wait for nodegroup to be ready
         run: |
           for i in {1..30}; do
-            READY_NODES=$(kubectl get nodes --no-headers 2>/dev/null | grep -c ' Ready ' || true)
+            READY_NODES=$(kubectl get nodes --no-headers | grep -c ' Ready ' || true)
             if [ "$READY_NODES" -ge 1 ]; then
               echo "Nodes are ready"
               break
             fi
-            echo "Waiting for nodes... ($i/30)"
+            echo "Waiting for nodes... ($i)"
             sleep 20
           done
 
