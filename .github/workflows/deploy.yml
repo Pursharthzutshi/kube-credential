@@ -48,25 +48,53 @@ jobs:
       - name: Create/Update CloudFormation stack (EKS + ECR)
         run: |
           STACK_NAME=${CLUSTER_NAME}-stack
-          aws cloudformation deploy \
-            --template-file infra/eks-stack.yaml \
-            --stack-name $STACK_NAME \
-            --capabilities CAPABILITY_NAMED_IAM \
-            --parameter-overrides \
-              ClusterName=${CLUSTER_NAME} \
-              KubernetesVersion=1.29 \
-              NodeInstanceType=${{ github.event.inputs.node-instance-type }}
+          
+          # Check if stack exists and if we have permission to describe it
+          if aws cloudformation describe-stacks --stack-name $STACK_NAME >/dev/null 2>&1; then
+            echo "Stack $STACK_NAME exists, updating..."
+            aws cloudformation deploy \
+              --template-file infra/eks-stack.yaml \
+              --stack-name $STACK_NAME \
+              --capabilities CAPABILITY_NAMED_IAM \
+              --parameter-overrides \
+                ClusterName=${CLUSTER_NAME} \
+                KubernetesVersion=1.29 \
+                NodeInstanceType=${{ github.event.inputs.node-instance-type }}
+          else
+            echo "Stack $STACK_NAME does not exist or no describe permission. Attempting to create..."
+            aws cloudformation deploy \
+              --template-file infra/eks-stack.yaml \
+              --stack-name $STACK_NAME \
+              --capabilities CAPABILITY_NAMED_IAM \
+              --parameter-overrides \
+                ClusterName=${CLUSTER_NAME} \
+                KubernetesVersion=1.29 \
+                NodeInstanceType=${{ github.event.inputs.node-instance-type }}
+          fi
 
       - name: Fetch ECR repo URIs
         id: ecr
         run: |
           STACK_NAME=${CLUSTER_NAME}-stack
-          FRONTEND=$(aws cloudformation describe-stacks --stack-name $STACK_NAME \
-            --query 'Stacks[0].Outputs[?OutputKey==`FrontendEcrUri`].OutputValue' --output text)
-          ISSUANCE=$(aws cloudformation describe-stacks --stack-name $STACK_NAME \
-            --query 'Stacks[0].Outputs[?OutputKey==`IssuanceEcrUri`].OutputValue' --output text)
-          VERIFICATION=$(aws cloudformation describe-stacks --stack-name $STACK_NAME \
-            --query 'Stacks[0].Outputs[?OutputKey==`VerificationEcrUri`].OutputValue' --output text)
+          
+          # Check if we have CloudFormation describe permissions
+          if aws cloudformation describe-stacks --stack-name $STACK_NAME >/dev/null 2>&1; then
+            echo "Using CloudFormation to get ECR URIs"
+            FRONTEND=$(aws cloudformation describe-stacks --stack-name $STACK_NAME \
+              --query 'Stacks[0].Outputs[?OutputKey==`FrontendEcrUri`].OutputValue' --output text)
+            ISSUANCE=$(aws cloudformation describe-stacks --stack-name $STACK_NAME \
+              --query 'Stacks[0].Outputs[?OutputKey==`IssuanceEcrUri`].OutputValue' --output text)
+            VERIFICATION=$(aws cloudformation describe-stacks --stack-name $STACK_NAME \
+              --query 'Stacks[0].Outputs[?OutputKey==`VerificationEcrUri`].OutputValue' --output text)
+          else
+            echo "CloudFormation describe permission denied. Using ECR list-repositories as fallback"
+            # Fallback: construct ECR URIs using standard naming convention
+            AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+            FRONTEND="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${CLUSTER_NAME}-frontend"
+            ISSUANCE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${CLUSTER_NAME}-issuance"
+            VERIFICATION="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${CLUSTER_NAME}-verification"
+          fi
+          
           echo "frontend=$FRONTEND" >> $GITHUB_OUTPUT
           echo "issuance=$ISSUANCE" >> $GITHUB_OUTPUT
           echo "verification=$VERIFICATION" >> $GITHUB_OUTPUT
