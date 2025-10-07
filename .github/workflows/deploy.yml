@@ -323,6 +323,15 @@ on:
         default: 'true'
         type: choice
         options: ['true','false']
+      # NEW: Allow configuring backend URLs for frontend
+      issuance-url:
+        description: Issuance backend URL (for frontend build)
+        required: false
+        default: ''
+      verification-url:
+        description: Verification backend URL (for frontend build)
+        required: false
+        default: ''
 
 jobs:
   deploy:
@@ -362,7 +371,6 @@ jobs:
         run: |
           STACK_NAME=${CLUSTER_NAME}-stack
 
-          # If stack exists, deploy update; if not, attempt create via deploy
           if aws cloudformation describe-stacks --stack-name $STACK_NAME >/dev/null 2>&1; then
             echo "Stack $STACK_NAME exists, updating..."
             aws cloudformation deploy \
@@ -407,7 +415,6 @@ jobs:
             echo "CloudFormation describe-stacks failed or not permitted; using fallback URIs."
           fi
 
-          # Fallback: construct expected URIs
           AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
           [ -z "$FRONTEND" ] && FRONTEND="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${CLUSTER_NAME}-frontend"
           [ -z "$ISSUANCE" ] && ISSUANCE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${CLUSTER_NAME}-issuance"
@@ -440,7 +447,6 @@ jobs:
             else
               echo "Creating ECR repo: $REPO_NAME"
               aws ecr create-repository --repository-name "$REPO_NAME" --region $AWS_REGION || true
-              # wait for visibility
               for i in {1..12}; do
                 if aws ecr describe-repositories --repository-names "$REPO_NAME" --region $AWS_REGION >/dev/null 2>&1; then
                   echo "Confirmed: $REPO_NAME is available"
@@ -493,40 +499,7 @@ jobs:
             fi
           done
 
-      - name: Build and push images
-        run: |
-          set -euo pipefail
-          FRONTEND_URI=${{ steps.ecr.outputs.frontend }}
-          ISSUANCE_URI=${{ steps.ecr.outputs.issuance }}
-          VERIFICATION_URI=${{ steps.ecr.outputs.verification }}
-
-          if [ "$DEPLOY_FRONTEND" = "true" ]; then
-            echo "Building frontend image -> $FRONTEND_URI:latest"
-            docker build \
-              --build-arg VITE_ISSUANCE_URL=http://issuance-service:4001 \
-              --build-arg VITE_VERIFY_URL=http://verification-service:4002 \
-              -t $FRONTEND_URI:latest ./frontend
-            docker push $FRONTEND_URI:latest
-          else
-            echo "Skipping frontend build/push"
-          fi
-
-          if [ "$DEPLOY_ISSUANCE" = "true" ]; then
-            echo "Building issuance image -> $ISSUANCE_URI:latest"
-            docker build -t $ISSUANCE_URI:latest ./backend/issuance-service
-            docker push $ISSUANCE_URI:latest
-          else
-            echo "Skipping issuance-service build/push"
-          fi
-
-          if [ "$DEPLOY_VERIFICATION" = "true" ]; then
-            echo "Building verification image -> $VERIFICATION_URI:latest"
-            docker build -t $VERIFICATION_URI:latest ./backend/verification-service
-            docker push $VERIFICATION_URI:latest
-          else
-            echo "Skipping verification-service build/push"
-          fi
-
+      # NEW: Deploy backend services first to get LoadBalancer URLs
       - name: Update kubeconfig
         run: |
           if aws eks describe-cluster --name $CLUSTER_NAME --region $AWS_REGION >/dev/null 2>&1; then
@@ -553,26 +526,136 @@ jobs:
             sleep 20
           done
 
-      - name: Apply Kubernetes manifests (with image substitution)
+      # Deploy backend services first
+      - name: Build and push backend images
         run: |
-          FRONTEND_URI=${{ steps.ecr.outputs.frontend }}
+          set -euo pipefail
           ISSUANCE_URI=${{ steps.ecr.outputs.issuance }}
           VERIFICATION_URI=${{ steps.ecr.outputs.verification }}
 
-          if [ "$DEPLOY_FRONTEND" = "true" ]; then
-            sed "s#yourdockerhub/kube-frontend:latest#$FRONTEND_URI:latest#g" k8s/frontend-deployment.yaml > /tmp/frontend.yaml
+          if [ "$DEPLOY_ISSUANCE" = "true" ]; then
+            echo "Building issuance image -> $ISSUANCE_URI:latest"
+            docker build -t $ISSUANCE_URI:latest ./backend/issuance-service
+            docker push $ISSUANCE_URI:latest
+          else
+            echo "Skipping issuance-service build/push"
           fi
+
+          if [ "$DEPLOY_VERIFICATION" = "true" ]; then
+            echo "Building verification image -> $VERIFICATION_URI:latest"
+            docker build -t $VERIFICATION_URI:latest ./backend/verification-service
+            docker push $VERIFICATION_URI:latest
+          else
+            echo "Skipping verification-service build/push"
+          fi
+
+      - name: Deploy backend services to Kubernetes
+        run: |
+          ISSUANCE_URI=${{ steps.ecr.outputs.issuance }}
+          VERIFICATION_URI=${{ steps.ecr.outputs.verification }}
+
+          # Always deploy MongoDB
+          kubectl apply -f k8s/mongo-deployment.yaml
+
           if [ "$DEPLOY_ISSUANCE" = "true" ]; then
             sed "s#yourdockerhub/issuance-service:latest#$ISSUANCE_URI:latest#g" k8s/issuance-deployment.yaml > /tmp/issuance.yaml
+            kubectl apply -f /tmp/issuance.yaml
+            echo "Waiting for issuance service to get external IP..."
+            kubectl wait --for=condition=ready pod -l app=issuance --timeout=300s || true
+          else
+            echo "Skipping issuance k8s apply"
           fi
+
           if [ "$DEPLOY_VERIFICATION" = "true" ]; then
             sed "s#yourdockerhub/verification-service:latest#$VERIFICATION_URI:latest#g" k8s/verification-deployment.yaml > /tmp/verification.yaml
+            kubectl apply -f /tmp/verification.yaml
+            echo "Waiting for verification service to get external IP..."
+            kubectl wait --for=condition=ready pod -l app=verification --timeout=300s || true
+          else
+            echo "Skipping verification k8s apply"
           fi
 
-          kubectl apply -f k8s/mongo-deployment.yaml
-          if [ "$DEPLOY_ISSUANCE" = "true" ]; then kubectl apply -f /tmp/issuance.yaml; else echo "Skipping issuance k8s apply"; fi
-          if [ "$DEPLOY_VERIFICATION" = "true" ]; then kubectl apply -f /tmp/verification.yaml; else echo "Skipping verification k8s apply"; fi
-          if [ "$DEPLOY_FRONTEND" = "true" ]; then kubectl apply -f /tmp/frontend.yaml; else echo "Skipping frontend k8s apply"; fi
+      # Get backend URLs and build frontend with them
+      - name: Get backend service URLs
+        id: backend_urls
+        run: |
+          # Wait for LoadBalancer IPs
+          echo "Waiting for LoadBalancer external IPs..."
+          sleep 30
+
+          ISSUANCE_URL="${{ github.event.inputs.issuance-url }}"
+          VERIFICATION_URL="${{ github.event.inputs.verification-url }}"
+
+          # If URLs not provided, try to get from LoadBalancer
+          if [ -z "$ISSUANCE_URL" ] && [ "$DEPLOY_ISSUANCE" = "true" ]; then
+            for i in {1..30}; do
+              ISSUANCE_IP=$(kubectl get svc issuance-service -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || \
+                            kubectl get svc issuance-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+              if [ -n "$ISSUANCE_IP" ]; then
+                ISSUANCE_URL="http://${ISSUANCE_IP}:4001"
+                echo "Found issuance URL: $ISSUANCE_URL"
+                break
+              fi
+              echo "Waiting for issuance LoadBalancer IP ($i/30)..."
+              sleep 10
+            done
+          fi
+
+          if [ -z "$VERIFICATION_URL" ] && [ "$DEPLOY_VERIFICATION" = "true" ]; then
+            for i in {1..30}; do
+              VERIFICATION_IP=$(kubectl get svc verification-service -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || \
+                                kubectl get svc verification-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+              if [ -n "$VERIFICATION_IP" ]; then
+                VERIFICATION_URL="http://${VERIFICATION_IP}:4002"
+                echo "Found verification URL: $VERIFICATION_URL"
+                break
+              fi
+              echo "Waiting for verification LoadBalancer IP ($i/30)..."
+              sleep 10
+            done
+          fi
+
+          # Fallback to internal URLs if LoadBalancer not ready
+          [ -z "$ISSUANCE_URL" ] && ISSUANCE_URL="http://issuance-service:4001"
+          [ -z "$VERIFICATION_URL" ] && VERIFICATION_URL="http://verification-service:4002"
+
+          echo "issuance_url=$ISSUANCE_URL" >> $GITHUB_OUTPUT
+          echo "verification_url=$VERIFICATION_URL" >> $GITHUB_OUTPUT
+
+          echo "Final URLs:"
+          echo "  Issuance: $ISSUANCE_URL"
+          echo "  Verification: $VERIFICATION_URL"
+
+      - name: Build and push frontend image
+        if: env.DEPLOY_FRONTEND == 'true'
+        run: |
+          set -euo pipefail
+          FRONTEND_URI=${{ steps.ecr.outputs.frontend }}
+          ISSUANCE_URL=${{ steps.backend_urls.outputs.issuance_url }}
+          VERIFICATION_URL=${{ steps.backend_urls.outputs.verification_url }}
+
+          echo "Building frontend with backend URLs:"
+          echo "  VITE_ISSUANCE_URL=$ISSUANCE_URL"
+          echo "  VITE_VERIFY_URL=$VERIFICATION_URL"
+
+          docker build \
+            --build-arg VITE_ISSUANCE_URL=$ISSUANCE_URL \
+            --build-arg VITE_VERIFY_URL=$VERIFICATION_URL \
+            -t $FRONTEND_URI:latest ./frontend
+          docker push $FRONTEND_URI:latest
+
+      - name: Deploy frontend to Kubernetes
+        if: env.DEPLOY_FRONTEND == 'true'
+        run: |
+          FRONTEND_URI=${{ steps.ecr.outputs.frontend }}
+          sed "s#yourdockerhub/kube-frontend:latest#$FRONTEND_URI:latest#g" k8s/frontend-deployment.yaml > /tmp/frontend.yaml
+          kubectl apply -f /tmp/frontend.yaml
 
       - name: Show services
-        run: kubectl get svc -o wide
+        run: |
+          echo "=== All Services ==="
+          kubectl get svc -o wide
+          echo ""
+          echo "=== Service URLs ==="
+          echo "Note: It may take a few minutes for LoadBalancer external IPs to be assigned."
+          kubectl get svc -o custom-columns=NAME:.metadata.name,TYPE:.spec.type,EXTERNAL-IP:.status.loadBalancer.ingress[0].hostname,PORT:.spec.ports[0].port
