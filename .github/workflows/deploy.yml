@@ -1,3 +1,161 @@
+# name: Deploy to EKS
+
+# on:
+#   workflow_dispatch:
+#     inputs:
+#       aws-region:
+#         description: AWS region
+#         required: true
+#         default: ap-south-1
+#       cluster-name:
+#         description: EKS cluster name
+#         required: true
+#         default: kube-credential-cluster
+#       node-instance-type:
+#         description: Node instance type
+#         required: true
+#         default: t3.medium
+
+# jobs:
+#   deploy:
+#     runs-on: ubuntu-latest
+#     permissions:
+#       id-token: write
+#       contents: read
+#     env:
+#       AWS_REGION: ${{ github.event.inputs.aws-region }}
+#       CLUSTER_NAME: ${{ github.event.inputs.cluster-name }}
+
+#     steps:
+#       - name: Checkout repository
+#         uses: actions/checkout@v4
+
+#       - name: Configure AWS Credentials
+#         uses: aws-actions/configure-aws-credentials@v4
+#         with:
+#           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+#           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+#           aws-region: ${{ env.AWS_REGION }}
+
+#       - name: Install eksctl, kubectl, jq
+#         run: |
+#           sudo apt-get update -y
+#           sudo apt-get install -y jq curl tar
+#           echo "📦 Installing eksctl and kubectl..."
+#           curl -sLO "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz"
+#           sudo tar -xzf eksctl_$(uname -s)_amd64.tar.gz -C /usr/local/bin
+#           curl -sSLo kubectl https://s3.${AWS_REGION}.amazonaws.com/amazon-eks/1.29.0/2024-08-12/bin/linux/amd64/kubectl
+#           chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+#           kubectl version --client
+#           eksctl version
+
+#       - name: Ensure EKS Cluster Exists
+#         run: |
+#           echo " Checking if EKS cluster '$CLUSTER_NAME' exists..."
+#           if aws eks describe-cluster --name $CLUSTER_NAME --region $AWS_REGION >/dev/null 2>&1; then
+#             echo " Cluster $CLUSTER_NAME already exists."
+#           else
+#             echo "Creating new EKS cluster..."
+#             eksctl create cluster \
+#               --name $CLUSTER_NAME \
+#               --region $AWS_REGION \
+#               --nodegroup-name kube-nodes \
+#               --nodes 2 \
+#               --node-type ${{ github.event.inputs.node-instance-type }} \
+#               --managed \
+#               --version 1.29
+#           fi
+
+#       - name: Update kubeconfig
+#         run: aws eks update-kubeconfig --name $CLUSTER_NAME --region $AWS_REGION
+
+#       - name: Wait for Nodes to be Ready
+#         run: |
+#           echo "⏳ Waiting for EKS nodes to be ready..."
+#           for i in {1..30}; do
+#             READY_NODES=$(kubectl get nodes --no-headers | grep -c ' Ready ' || true)
+#             if [ "$READY_NODES" -ge 1 ]; then
+#               echo "EKS nodes are ready."
+#               kubectl get nodes -o wide
+#               break
+#             fi
+#             echo "Waiting for nodes... ($i/30)"
+#             sleep 20
+#           done
+
+#       - name: Login to ECR
+#         run: |
+#           ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+#           echo "Logging into ECR..."
+#           aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+
+#       - name: Ensure ECR Repositories Exist
+#         run: |
+#           ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+#           for repo in frontend issuance verification; do
+#             if aws ecr describe-repositories --repository-names ${CLUSTER_NAME}-${repo} --region $AWS_REGION >/dev/null 2>&1; then
+#               echo "ECR repository '${CLUSTER_NAME}-${repo}' exists."
+#             else
+#               echo "Creating ECR repository '${CLUSTER_NAME}-${repo}'..."
+#               aws ecr create-repository --repository-name ${CLUSTER_NAME}-${repo} --region $AWS_REGION
+#             fi
+#           done
+
+#       - name: Build and Push Docker Images
+#         run: |
+#           ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+#           FRONTEND_URI=$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/${CLUSTER_NAME}-frontend
+#           ISSUANCE_URI=$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/${CLUSTER_NAME}-issuance
+#           VERIFICATION_URI=$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/${CLUSTER_NAME}-verification
+
+#           echo "Building and pushing Docker images..."
+#           docker build -t $FRONTEND_URI:latest ./frontend
+#           docker push $FRONTEND_URI:latest
+
+#           docker build -t $ISSUANCE_URI:latest ./backend/issuance-service
+#           docker push $ISSUANCE_URI:latest
+
+#           docker build -t $VERIFICATION_URI:latest ./backend/verification-service
+#           docker push $VERIFICATION_URI:latest
+
+#           echo "frontend=$FRONTEND_URI" >> $GITHUB_ENV
+#           echo "issuance=$ISSUANCE_URI" >> $GITHUB_ENV
+#           echo "verification=$VERIFICATION_URI" >> $GITHUB_ENV
+
+#       - name: Apply Kubernetes Manifests with Image Substitution
+#         run: |
+#           echo "Applying Kubernetes manifests..."
+#           sed "s#yourdockerhub/kube-frontend:latest#${{ env.frontend }}:latest#g" k8s/frontend-deployment.yaml > /tmp/frontend.yaml
+#           sed "s#yourdockerhub/issuance-service:latest#${{ env.issuance }}:latest#g" k8s/issuance-deployment.yaml > /tmp/issuance.yaml
+#           sed "s#yourdockerhub/verification-service:latest#${{ env.verification }}:latest#g" k8s/verification-deployment.yaml > /tmp/verification.yaml
+
+#           kubectl apply -f k8s/mongo-deployment.yaml
+#           kubectl apply -f /tmp/issuance.yaml
+#           kubectl apply -f /tmp/verification.yaml
+#           kubectl apply -f /tmp/frontend.yaml
+
+#       - name: Wait for LoadBalancer and Display URL
+#         run: |
+#           echo "Waiting for frontend LoadBalancer URL..."
+#           for i in {1..30}; do
+#             EXTERNAL_URL=$(kubectl get svc frontend-service -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+#             if [ -n "$EXTERNAL_URL" ]; then
+#               echo "Frontend available at: http://$EXTERNAL_URL"
+#               echo "FRONTEND_URL=http://$EXTERNAL_URL" >> $GITHUB_ENV
+#               break
+#             fi
+#             echo "⏳ Waiting for LoadBalancer external IP... ($i/30)"
+#             sleep 20
+#           done
+
+#       - name: Summary
+#         run: |
+#           echo "Deployment complete!"
+#           echo "Frontend URL: ${{ env.FRONTEND_URL }}"
+#           echo "Issuance Image: ${{ env.issuance }}"
+#           echo "Verification Image: ${{ env.verification }}"
+
+
 name: Deploy to EKS
 
 on:
@@ -40,20 +198,30 @@ jobs:
       - name: Install eksctl, kubectl, jq
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y jq curl tar
-          echo "📦 Installing eksctl and kubectl..."
-          curl -sLO "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz"
-          sudo tar -xzf eksctl_$(uname -s)_amd64.tar.gz -C /usr/local/bin
-          curl -sSLo kubectl https://s3.${AWS_REGION}.amazonaws.com/amazon-eks/1.29.0/2024-08-12/bin/linux/amd64/kubectl
-          chmod +x kubectl && sudo mv kubectl /usr/local/bin/
-          kubectl version --client
+          sudo apt-get install -y jq curl tar gzip
+
+          # install eksctl
+          curl -sSLO "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz"
+          tar -xzf "eksctl_$(uname -s)_amd64.tar.gz" -C /tmp
+          sudo mv /tmp/eksctl /usr/local/bin/eksctl
+          sudo chmod +x /usr/local/bin/eksctl
+
+          # install kubectl (latest stable)
+          KUBECTL_VERSION=$(curl -L -s https://dl.k8s.io/release/stable.txt)
+          curl -sSLO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          sudo chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/kubectl
+
+          # sanity checks
           eksctl version
+          kubectl version --client --short
+          jq --version
 
       - name: Ensure EKS Cluster Exists
         run: |
-          echo " Checking if EKS cluster '$CLUSTER_NAME' exists..."
+          echo "Checking if EKS cluster '$CLUSTER_NAME' exists..."
           if aws eks describe-cluster --name $CLUSTER_NAME --region $AWS_REGION >/dev/null 2>&1; then
-            echo " Cluster $CLUSTER_NAME already exists."
+            echo "Cluster $CLUSTER_NAME already exists."
           else
             echo "Creating new EKS cluster..."
             eksctl create cluster \
@@ -71,7 +239,7 @@ jobs:
 
       - name: Wait for Nodes to be Ready
         run: |
-          echo "⏳ Waiting for EKS nodes to be ready..."
+          echo "Waiting for EKS nodes to be ready..."
           for i in {1..30}; do
             READY_NODES=$(kubectl get nodes --no-headers | grep -c ' Ready ' || true)
             if [ "$READY_NODES" -ge 1 ]; then
@@ -144,7 +312,7 @@ jobs:
               echo "FRONTEND_URL=http://$EXTERNAL_URL" >> $GITHUB_ENV
               break
             fi
-            echo "⏳ Waiting for LoadBalancer external IP... ($i/30)"
+            echo "Waiting for LoadBalancer external IP... ($i/30)"
             sleep 20
           done
 
