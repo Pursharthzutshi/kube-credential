@@ -1,0 +1,26 @@
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: zupple-eks
+  region: us-east-1
+
+managedNodeGroups:
+  - name: ng-1
+    instanceType: t3.micro    
+    desiredCapacity: 2
+    minSize: 1
+    maxSize: 3
+    volumeSize: 20
+    ssh:
+      allow: false
+    iam:
+      withAddonPolicies:
+        autoScaler: true
+        externalDNS: false
+        certManager: false
+        ebs: true
+    labels:
+      nodegroup: ng-1
+    tags:
+      Project: zupple

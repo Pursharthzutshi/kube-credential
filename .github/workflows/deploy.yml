@@ -1,3 +1,210 @@
+# name: Deploy to EKS
+
+# on:
+#   workflow_dispatch:
+#     inputs:
+#       aws-region:
+#         description: AWS region
+#         required: true
+#         default: us-east-1
+#       cluster-name:
+#         description: EKS cluster name
+#         required: true
+#         default: zupple-eks
+#       node-instance-type:
+#         description: Node instance type
+#         required: true
+#         default: t3.micro
+
+# jobs:
+#   deploy:
+#     runs-on: ubuntu-latest
+#     permissions:
+#       id-token: write
+#       contents: read
+#     env:
+#       AWS_REGION: ${{ github.event.inputs.aws-region }}
+#       CLUSTER_NAME: ${{ github.event.inputs.cluster-name }}
+#     steps:
+#       - name: Checkout
+#         uses: actions/checkout@v4
+
+#       - name: Configure AWS Credentials
+#         uses: aws-actions/configure-aws-credentials@v4
+#         with:
+#           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+#           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+#           aws-region: ${{ env.AWS_REGION }}
+
+#       - name: Install dependencies
+#         run: |
+#           sudo apt-get update -y
+#           sudo apt-get install -y jq
+#           curl -sSLo kubectl https://s3.us-west-2.amazonaws.com/amazon-eks/1.29.0/2024-08-12/bin/linux/amd64/kubectl
+#           chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+#           curl -sSLo aws-iam-authenticator https://github.com/kubernetes-sigs/aws-iam-authenticator/releases/download/v0.6.22/aws-iam-authenticator_0.6.22_linux_amd64
+#           chmod +x aws-iam-authenticator && sudo mv aws-iam-authenticator /usr/local/bin/
+          
+#           # Install eksctl
+#           ARCH=amd64
+#           PLATFORM=$(uname -s)_$ARCH
+#           curl -sLO "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$PLATFORM.tar.gz"
+#           tar -xzf eksctl_$PLATFORM.tar.gz -C /tmp && rm eksctl_$PLATFORM.tar.gz
+#           sudo mv /tmp/eksctl /usr/local/bin
+
+#       - name: Create/Update CloudFormation stack (EKS + ECR)
+#         run: |
+#           STACK_NAME=${CLUSTER_NAME}-stack
+          
+#           # Test if we have basic CloudFormation permissions
+#           if aws cloudformation describe-stacks --stack-name $STACK_NAME >/dev/null 2>&1; then
+#             echo "Stack $STACK_NAME exists, updating..."
+#             aws cloudformation deploy \
+#               --template-file infra/eks-stack.yaml \
+#               --stack-name $STACK_NAME \
+#               --capabilities CAPABILITY_NAMED_IAM \
+#               --parameter-overrides \
+#                 ClusterName=${CLUSTER_NAME} \
+#                 KubernetesVersion=1.29 \
+#                 NodeInstanceType=${{ github.event.inputs.node-instance-type }}
+#           elif aws cloudformation validate-template --template-body file://infra/eks-stack.yaml >/dev/null 2>&1; then
+#             echo "Stack $STACK_NAME does not exist. Attempting to create..."
+#             aws cloudformation deploy \
+#               --template-file infra/eks-stack.yaml \
+#               --stack-name $STACK_NAME \
+#               --capabilities CAPABILITY_NAMED_IAM \
+#               --parameter-overrides \
+#                 ClusterName=${CLUSTER_NAME} \
+#                 KubernetesVersion=1.29 \
+#                 NodeInstanceType=${{ github.event.inputs.node-instance-type }}
+#           else
+#             echo "CloudFormation permissions insufficient. Creating ECR repositories directly..."
+#             # Create ECR repositories directly without CloudFormation
+#             aws ecr create-repository --repository-name ${CLUSTER_NAME}-frontend --region $AWS_REGION 2>/dev/null || echo "Frontend repo already exists"
+#             aws ecr create-repository --repository-name ${CLUSTER_NAME}-issuance --region $AWS_REGION 2>/dev/null || echo "Issuance repo already exists"
+#             aws ecr create-repository --repository-name ${CLUSTER_NAME}-verification --region $AWS_REGION 2>/dev/null || echo "Verification repo already exists"
+#             echo "ECR repositories created. Will check EKS cluster in next step."
+#           fi
+
+#       - name: Create EKS cluster if not exists
+#         run: |
+#           if ! aws eks describe-cluster --name $CLUSTER_NAME --region $AWS_REGION >/dev/null 2>&1; then
+#             echo "EKS cluster $CLUSTER_NAME does not exist. Creating..."
+#             eksctl create cluster \
+#               --name $CLUSTER_NAME \
+#               --region $AWS_REGION \
+#               --node-type ${{ github.event.inputs.node-instance-type }} \
+#               --nodes 2 \
+#               --managed \
+#               --version 1.29
+#             echo "EKS cluster created successfully!"
+#           else
+#             echo "EKS cluster $CLUSTER_NAME already exists."
+#           fi
+
+#       - name: Fetch ECR repo URIs
+#         id: ecr
+#         run: |
+#           STACK_NAME=${CLUSTER_NAME}-stack
+          
+#           # Check if we have CloudFormation describe permissions
+#           if aws cloudformation describe-stacks --stack-name $STACK_NAME >/dev/null 2>&1; then
+#             echo "Using CloudFormation to get ECR URIs"
+#             FRONTEND=$(aws cloudformation describe-stacks --stack-name $STACK_NAME \
+#               --query 'Stacks[0].Outputs[?OutputKey==`FrontendEcrUri`].OutputValue' --output text)
+#             ISSUANCE=$(aws cloudformation describe-stacks --stack-name $STACK_NAME \
+#               --query 'Stacks[0].Outputs[?OutputKey==`IssuanceEcrUri`].OutputValue' --output text)
+#             VERIFICATION=$(aws cloudformation describe-stacks --stack-name $STACK_NAME \
+#               --query 'Stacks[0].Outputs[?OutputKey==`VerificationEcrUri`].OutputValue' --output text)
+#           else
+#             echo "CloudFormation describe permission denied. Using ECR list-repositories as fallback"
+#             # Fallback: construct ECR URIs using standard naming convention
+#             AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+#             FRONTEND="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${CLUSTER_NAME}-frontend"
+#             ISSUANCE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${CLUSTER_NAME}-issuance"
+#             VERIFICATION="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${CLUSTER_NAME}-verification"
+#           fi
+          
+#           echo "frontend=$FRONTEND" >> $GITHUB_OUTPUT
+#           echo "issuance=$ISSUANCE" >> $GITHUB_OUTPUT
+#           echo "verification=$VERIFICATION" >> $GITHUB_OUTPUT
+
+#       - name: ECR Login
+#         run: aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $(echo "${{ steps.ecr.outputs.frontend }}" | cut -d'/' -f1)
+
+#       - name: Build and push images
+#         run: |
+#           FRONTEND_URI=${{ steps.ecr.outputs.frontend }}
+#           ISSUANCE_URI=${{ steps.ecr.outputs.issuance }}
+#           VERIFICATION_URI=${{ steps.ecr.outputs.verification }}
+
+#           docker build \
+#             --build-arg VITE_ISSUANCE_URL=http://issuance-service:4001 \
+#             --build-arg VITE_VERIFY_URL=http://verification-service:4002 \
+#             -t $FRONTEND_URI:latest ./frontend
+#           docker push $FRONTEND_URI:latest
+
+#           docker build -t $ISSUANCE_URI:latest ./backend/issuance-service
+#           docker push $ISSUANCE_URI:latest
+
+#           docker build -t $VERIFICATION_URI:latest ./backend/verification-service
+#           docker push $VERIFICATION_URI:latest
+
+#       - name: Update kubeconfig
+#         run: |
+#           # Update kubeconfig for the cluster
+#           aws eks update-kubeconfig --name $CLUSTER_NAME --region $AWS_REGION
+#           echo "Kubeconfig updated successfully!"
+
+#       - name: Wait for nodegroup to be ready
+#         run: |
+#           echo "Waiting for nodes to be ready..."
+#           for i in {1..30}; do
+#             READY_NODES=$(kubectl get nodes --no-headers 2>/dev/null | grep -c ' Ready ' || true)
+#             if [ "$READY_NODES" -ge 1 ]; then
+#               echo "✓ $READY_NODES node(s) are ready"
+#               kubectl get nodes
+#               break
+#             fi
+#             echo "Waiting for nodes... attempt $i/30"
+#             sleep 20
+#           done
+          
+#           # Final check
+#           READY_NODES=$(kubectl get nodes --no-headers 2>/dev/null | grep -c ' Ready ' || true)
+#           if [ "$READY_NODES" -lt 1 ]; then
+#             echo "ERROR: No nodes became ready after 10 minutes"
+#             exit 1
+#           fi
+
+#       - name: Apply Kubernetes manifests (with image substitution)
+#         run: |
+#           FRONTEND_URI=${{ steps.ecr.outputs.frontend }}
+#           ISSUANCE_URI=${{ steps.ecr.outputs.issuance }}
+#           VERIFICATION_URI=${{ steps.ecr.outputs.verification }}
+
+#           sed "s#yourdockerhub/kube-frontend:latest#$FRONTEND_URI:latest#g" k8s/frontend-deployment.yaml > /tmp/frontend.yaml
+#           sed "s#yourdockerhub/issuance-service:latest#$ISSUANCE_URI:latest#g" k8s/issuance-deployment.yaml > /tmp/issuance.yaml
+#           sed "s#yourdockerhub/verification-service:latest#$VERIFICATION_URI:latest#g" k8s/verification-deployment.yaml > /tmp/verification.yaml
+
+#           echo "Applying Kubernetes manifests..."
+#           kubectl apply -f k8s/mongo-deployment.yaml
+#           kubectl apply -f /tmp/issuance.yaml
+#           kubectl apply -f /tmp/verification.yaml
+#           kubectl apply -f /tmp/frontend.yaml
+          
+#           echo "✓ Manifests applied successfully!"
+
+#       - name: Show services
+#         run: |
+#           echo "Services deployed:"
+#           kubectl get svc -o wide
+#           echo ""
+#           echo "Pods status:"
+#           kubectl get pods -o wide
+#           echo ""
+#           echo "Deployment complete! "
+
 name: Deploy to EKS
 
 on:
@@ -44,19 +251,17 @@ jobs:
           chmod +x kubectl && sudo mv kubectl /usr/local/bin/
           curl -sSLo aws-iam-authenticator https://github.com/kubernetes-sigs/aws-iam-authenticator/releases/download/v0.6.22/aws-iam-authenticator_0.6.22_linux_amd64
           chmod +x aws-iam-authenticator && sudo mv aws-iam-authenticator /usr/local/bin/
-          
-          # Install eksctl
           ARCH=amd64
           PLATFORM=$(uname -s)_$ARCH
           curl -sLO "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$PLATFORM.tar.gz"
           tar -xzf eksctl_$PLATFORM.tar.gz -C /tmp && rm eksctl_$PLATFORM.tar.gz
           sudo mv /tmp/eksctl /usr/local/bin
+          eksctl version || true
+          kubectl version --client || true
 
-      - name: Create/Update CloudFormation stack (EKS + ECR)
+      - name: Create/Update CloudFormation stack (ECR / optional)
         run: |
           STACK_NAME=${CLUSTER_NAME}-stack
-          
-          # Test if we have basic CloudFormation permissions
           if aws cloudformation describe-stacks --stack-name $STACK_NAME >/dev/null 2>&1; then
             echo "Stack $STACK_NAME exists, updating..."
             aws cloudformation deploy \
@@ -78,38 +283,54 @@ jobs:
                 KubernetesVersion=1.29 \
                 NodeInstanceType=${{ github.event.inputs.node-instance-type }}
           else
-            echo "CloudFormation permissions insufficient. Creating ECR repositories directly..."
-            # Create ECR repositories directly without CloudFormation
+            echo "CloudFormation template invalid or insufficient permissions. Creating ECR repositories directly as fallback..."
             aws ecr create-repository --repository-name ${CLUSTER_NAME}-frontend --region $AWS_REGION 2>/dev/null || echo "Frontend repo already exists"
             aws ecr create-repository --repository-name ${CLUSTER_NAME}-issuance --region $AWS_REGION 2>/dev/null || echo "Issuance repo already exists"
             aws ecr create-repository --repository-name ${CLUSTER_NAME}-verification --region $AWS_REGION 2>/dev/null || echo "Verification repo already exists"
-            echo "ECR repositories created. Will check EKS cluster in next step."
+            echo "ECR repositories created (fallback)."
           fi
 
-      - name: Create EKS cluster if not exists
+      - name: Create EKS cluster (control plane only)
         run: |
           if ! aws eks describe-cluster --name $CLUSTER_NAME --region $AWS_REGION >/dev/null 2>&1; then
-            echo "EKS cluster $CLUSTER_NAME does not exist. Creating..."
-            eksctl create cluster \
-              --name $CLUSTER_NAME \
-              --region $AWS_REGION \
-              --node-type ${{ github.event.inputs.node-instance-type }} \
-              --nodes 2 \
-              --managed \
-              --version 1.29
-            echo "EKS cluster created successfully!"
+            echo "Creating control plane from infra/cluster.yaml..."
+            eksctl create cluster -f infra/cluster.yaml
+            echo "Cluster creation command finished. eksctl may still be provisioning resources — check logs."
           else
-            echo "EKS cluster $CLUSTER_NAME already exists."
+            echo "EKS cluster $CLUSTER_NAME already exists, skipping control plane creation."
+          fi
+
+      - name: Create or update EKS nodegroup (managed)
+        run: |
+          NODE_TYPE="${{ github.event.inputs.node-instance-type }}"
+          # copy and replace instance type; this sed assumes the file has a line like `instanceType: t3.micro`
+          cp infra/nodegroup.yaml /tmp/nodegroup.yaml
+          sed -i "s/instanceType: .*/instanceType: ${NODE_TYPE}/" /tmp/nodegroup.yaml || true
+          echo "Nodegroup file prepared at /tmp/nodegroup.yaml"
+          set -o pipefail
+          if eksctl get nodegroup --cluster "$CLUSTER_NAME" --region "$AWS_REGION" --name ng-1 >/dev/null 2>&1; then
+            echo "Nodegroup ng-1 already present (skipping create)."
+          else
+            echo "Creating nodegroup ng-1..."
+            if ! eksctl create nodegroup -f /tmp/nodegroup.yaml --cluster "$CLUSTER_NAME" --region "$AWS_REGION"; then
+              echo "Nodegroup creation failed. Dumping CloudFormation events for the eksctl nodegroup stack (if present)..."
+              CFN_STACK="eksctl-${CLUSTER_NAME}-nodegroup-ng-1"
+              echo "Attempting to describe stack events for $CFN_STACK"
+              aws cloudformation describe-stack-events --stack-name "$CFN_STACK" --region "$AWS_REGION" --output table || true
+              echo "Also showing autoscaling groups that mention the cluster name (if any):"
+              aws autoscaling describe-auto-scaling-groups --query "AutoScalingGroups[?contains(AutoScalingGroupName, \`${CLUSTER_NAME}\`)]" --region "$AWS_REGION" --output table || true
+              echo "Check EC2 instances launched for this cluster:"
+              aws ec2 describe-instances --filters "Name=tag:eks:cluster-name,Values=${CLUSTER_NAME}" --region "$AWS_REGION" --output table || true
+              # fail the job so you can inspect the logs
+              exit 1
+            fi
           fi
 
       - name: Fetch ECR repo URIs
         id: ecr
         run: |
           STACK_NAME=${CLUSTER_NAME}-stack
-          
-          # Check if we have CloudFormation describe permissions
           if aws cloudformation describe-stacks --stack-name $STACK_NAME >/dev/null 2>&1; then
-            echo "Using CloudFormation to get ECR URIs"
             FRONTEND=$(aws cloudformation describe-stacks --stack-name $STACK_NAME \
               --query 'Stacks[0].Outputs[?OutputKey==`FrontendEcrUri`].OutputValue' --output text)
             ISSUANCE=$(aws cloudformation describe-stacks --stack-name $STACK_NAME \
@@ -117,20 +338,20 @@ jobs:
             VERIFICATION=$(aws cloudformation describe-stacks --stack-name $STACK_NAME \
               --query 'Stacks[0].Outputs[?OutputKey==`VerificationEcrUri`].OutputValue' --output text)
           else
-            echo "CloudFormation describe permission denied. Using ECR list-repositories as fallback"
-            # Fallback: construct ECR URIs using standard naming convention
             AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
             FRONTEND="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${CLUSTER_NAME}-frontend"
             ISSUANCE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${CLUSTER_NAME}-issuance"
             VERIFICATION="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${CLUSTER_NAME}-verification"
           fi
-          
           echo "frontend=$FRONTEND" >> $GITHUB_OUTPUT
           echo "issuance=$ISSUANCE" >> $GITHUB_OUTPUT
           echo "verification=$VERIFICATION" >> $GITHUB_OUTPUT
 
       - name: ECR Login
-        run: aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $(echo "${{ steps.ecr.outputs.frontend }}" | cut -d'/' -f1)
+        run: |
+          # extract registry host using frontend uri
+          REGISTRY_HOST=$(echo "${{ steps.ecr.outputs.frontend }}" | cut -d'/' -f1)
+          aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin "${REGISTRY_HOST}"
 
       - name: Build and push images
         run: |
@@ -152,30 +373,28 @@ jobs:
 
       - name: Update kubeconfig
         run: |
-          # Update kubeconfig for the cluster
           aws eks update-kubeconfig --name $CLUSTER_NAME --region $AWS_REGION
-          echo "Kubeconfig updated successfully!"
+          echo "Kubeconfig updated successfully."
 
-      - name: Wait for nodegroup to be ready
+      - name: Wait for nodegroup nodes to become Ready
         run: |
-          echo "Waiting for nodes to be ready..."
-          for i in {1..30}; do
-            READY_NODES=$(kubectl get nodes --no-headers 2>/dev/null | grep -c ' Ready ' || true)
-            if [ "$READY_NODES" -ge 1 ]; then
-              echo "✓ $READY_NODES node(s) are ready"
-              kubectl get nodes
-              break
+          echo "Waiting up to 15 minutes for at least 1 node to be Ready..."
+          SECONDS_WAITED=0
+          INTERVAL=20
+          MAX_SECONDS=$((15 * 60))
+          until kubectl get nodes --no-headers 2>/dev/null | grep -E ' Ready ' >/dev/null 2>&1; do
+            if [ "$SECONDS_WAITED" -ge "$MAX_SECONDS" ]; then
+              echo "ERROR: No nodes became ready after $((SECONDS_WAITED/60)) minutes."
+              kubectl get nodes -o wide || true
+              kubectl get pods -A -o wide || true
+              exit 1
             fi
-            echo "Waiting for nodes... attempt $i/30"
-            sleep 20
+            echo "Waiting for nodes... ($((SECONDS_WAITED/60))m elapsed)"
+            sleep $INTERVAL
+            SECONDS_WAITED=$((SECONDS_WAITED + INTERVAL))
           done
-          
-          # Final check
-          READY_NODES=$(kubectl get nodes --no-headers 2>/dev/null | grep -c ' Ready ' || true)
-          if [ "$READY_NODES" -lt 1 ]; then
-            echo "ERROR: No nodes became ready after 10 minutes"
-            exit 1
-          fi
+          echo "Nodes are Ready:"
+          kubectl get nodes -o wide
 
       - name: Apply Kubernetes manifests (with image substitution)
         run: |
@@ -192,470 +411,14 @@ jobs:
           kubectl apply -f /tmp/issuance.yaml
           kubectl apply -f /tmp/verification.yaml
           kubectl apply -f /tmp/frontend.yaml
-          
-          echo "✓ Manifests applied successfully!"
+          echo "Manifests applied."
 
-      - name: Show services
+      - name: Show services and pods
         run: |
-          echo "Services deployed:"
-          kubectl get svc -o wide
+          echo "Services:"
+          kubectl get svc -o wide || true
           echo ""
-          echo "Pods status:"
-          kubectl get pods -o wide
+          echo "Pods:"
+          kubectl get pods -o wide || true
           echo ""
-          echo "Deployment complete! "
-
-
-
-
-
-
-# name: Deploy to EKS
-
-# on:
-#   workflow_dispatch:
-#     inputs:
-#       aws-region:
-#         description: AWS region
-#         required: true
-#         default: us-east-1
-#       cluster-name:
-#         description: EKS cluster name
-#         required: true
-#         default: zupple-eks
-#       node-instance-type:
-#         description: Node instance type
-#         required: true
-#         default: t3.micro
-
-# jobs:
-#   deploy:
-#     runs-on: ubuntu-latest
-#     permissions:
-#       id-token: write
-#       contents: read
-#     env:
-#       AWS_REGION: ${{ github.event.inputs.aws-region }}
-#       CLUSTER_NAME: ${{ github.event.inputs.cluster-name }}
-
-#     steps:
-#       - name: Checkout
-#         uses: actions/checkout@v4
-
-#       - name: Configure AWS Credentials
-#         uses: aws-actions/configure-aws-credentials@v4
-#         with:
-#           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-#           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-#           aws-region: ${{ env.AWS_REGION }}
-
-#       - name: Install dependencies
-#         run: |
-#           sudo apt-get update -y
-#           sudo apt-get install -y jq
-#           curl -sSLo kubectl https://s3.us-west-2.amazonaws.com/amazon-eks/1.29.0/2024-08-12/bin/linux/amd64/kubectl
-#           chmod +x kubectl && sudo mv kubectl /usr/local/bin/
-#           curl -sSLo aws-iam-authenticator https://github.com/kubernetes-sigs/aws-iam-authenticator/releases/download/v0.6.22/aws-iam-authenticator_0.6.22_linux_amd64
-#           chmod +x aws-iam-authenticator && sudo mv aws-iam-authenticator /usr/local/bin/
-          
-#           # Install eksctl
-#           ARCH=amd64
-#           PLATFORM=$(uname -s)_$ARCH
-#           curl -sLO "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$PLATFORM.tar.gz"
-#           tar -xzf eksctl_$PLATFORM.tar.gz -C /tmp && rm eksctl_$PLATFORM.tar.gz
-#           sudo mv /tmp/eksctl /usr/local/bin
-
-#       - name: Create/Update CloudFormation stack (EKS + ECR)
-#         run: |
-#           STACK_NAME=${CLUSTER_NAME}-stack
-          
-#           if aws cloudformation describe-stacks --stack-name $STACK_NAME >/dev/null 2>&1; then
-#             echo "Stack $STACK_NAME exists, updating..."
-#             aws cloudformation deploy \
-#               --template-file infra/eks-stack.yaml \
-#               --stack-name $STACK_NAME \
-#               --capabilities CAPABILITY_NAMED_IAM \
-#               --parameter-overrides \
-#                 ClusterName=${CLUSTER_NAME} \
-#                 KubernetesVersion=1.29 \
-#                 NodeInstanceType=${{ github.event.inputs.node-instance-type }}
-#           elif aws cloudformation validate-template --template-body file://infra/eks-stack.yaml >/dev/null 2>&1; then
-#             echo "Stack $STACK_NAME does not exist. Creating..."
-#             aws cloudformation deploy \
-#               --template-file infra/eks-stack.yaml \
-#               --stack-name $STACK_NAME \
-#               --capabilities CAPABILITY_NAMED_IAM \
-#               --parameter-overrides \
-#                 ClusterName=${CLUSTER_NAME} \
-#                 KubernetesVersion=1.29 \
-#                 NodeInstanceType=${{ github.event.inputs.node-instance-type }}
-#           else
-#             echo "CloudFormation permissions insufficient. Creating ECR repositories directly..."
-#             aws ecr create-repository --repository-name ${CLUSTER_NAME}-frontend --region $AWS_REGION 2>/dev/null || echo "Frontend repo already exists"
-#             aws ecr create-repository --repository-name ${CLUSTER_NAME}-issuance --region $AWS_REGION 2>/dev/null || echo "Issuance repo already exists"
-#             aws ecr create-repository --repository-name ${CLUSTER_NAME}-verification --region $AWS_REGION 2>/dev/null || echo "Verification repo already exists"
-#             echo "ECR repositories created. Will check EKS cluster in next step."
-#           fi
-
-#       - name: Create EKS cluster if not exists
-#         run: |
-#           if ! aws eks describe-cluster --name $CLUSTER_NAME --region $AWS_REGION >/dev/null 2>&1; then
-#             echo "EKS cluster $CLUSTER_NAME does not exist. Creating..."
-#             eksctl create cluster \
-#               --name $CLUSTER_NAME \
-#               --region $AWS_REGION \
-#               --node-type ${{ github.event.inputs.node-instance-type }} \
-#               --nodes 2 \
-#               --managed \
-#               --version 1.29
-#             echo "EKS cluster created successfully!"
-#           else
-#             echo "EKS cluster $CLUSTER_NAME already exists."
-#             CLUSTER_STATUS=$(aws eks describe-cluster --name $CLUSTER_NAME --region $AWS_REGION --query 'cluster.status' --output text)
-#             echo "Cluster status: $CLUSTER_STATUS"
-#           fi
-
-#       - name: Create nodegroup if not exists
-#         run: |
-#           NODEGROUP_NAME=ng-1
-#           if ! aws eks describe-nodegroup --cluster-name $CLUSTER_NAME --nodegroup-name $NODEGROUP_NAME --region $AWS_REGION >/dev/null 2>&1; then
-#             echo "Nodegroup $NODEGROUP_NAME does not exist. Creating..."
-#             eksctl create nodegroup \
-#               --cluster $CLUSTER_NAME \
-#               --region $AWS_REGION \
-#               --name $NODEGROUP_NAME \
-#               --node-type ${{ github.event.inputs.node-instance-type }} \
-#               --nodes 2 \
-#               --nodes-min 1 \
-#               --nodes-max 3 \
-#               --managed
-#             echo "Nodegroup $NODEGROUP_NAME creation initiated!"
-#           else
-#             echo "Nodegroup $NODEGROUP_NAME already exists."
-#           fi
-
-#       - name: Wait for nodegroup to be ACTIVE and diagnose issues
-#         run: |
-#           NODEGROUP_NAME=ng-1
-#           echo "Waiting for nodegroup to reach ACTIVE status..."
-          
-#           for i in {1..45}; do
-#             NODEGROUP_STATUS=$(aws eks describe-nodegroup \
-#               --cluster-name $CLUSTER_NAME \
-#               --nodegroup-name $NODEGROUP_NAME \
-#               --region $AWS_REGION \
-#               --query 'nodegroup.status' \
-#               --output text 2>/dev/null || echo "UNKNOWN")
-            
-#             echo "[$i/45] Nodegroup status: $NODEGROUP_STATUS ($(($i * 20 / 60)) min)"
-            
-#             if [ "$NODEGROUP_STATUS" = "ACTIVE" ]; then
-#               echo "✓ Nodegroup is ACTIVE!"
-              
-#               # Verify nodes are actually launching
-#               echo ""
-#               echo "Checking Auto Scaling Group..."
-#               ASG_NAME=$(aws eks describe-nodegroup \
-#                 --cluster-name $CLUSTER_NAME \
-#                 --nodegroup-name $NODEGROUP_NAME \
-#                 --region $AWS_REGION \
-#                 --query 'nodegroup.resources.autoScalingGroups[0].name' \
-#                 --output text 2>/dev/null)
-              
-#               if [ -n "$ASG_NAME" ] && [ "$ASG_NAME" != "None" ]; then
-#                 aws autoscaling describe-auto-scaling-groups \
-#                   --auto-scaling-group-names $ASG_NAME \
-#                   --region $AWS_REGION \
-#                   --query 'AutoScalingGroups[0].{DesiredCapacity:DesiredCapacity,MinSize:MinSize,MaxSize:MaxSize,Instances:Instances[*].{InstanceId:InstanceId,HealthStatus:HealthStatus,LifecycleState:LifecycleState}}' \
-#                   --output json
-#               fi
-#               break
-#             fi
-            
-#             if [ "$NODEGROUP_STATUS" = "CREATE_FAILED" ] || [ "$NODEGROUP_STATUS" = "DEGRADED" ]; then
-#               echo ""
-#               echo "======================================"
-#               echo "ERROR: Nodegroup is in $NODEGROUP_STATUS state"
-#               echo "======================================"
-              
-#               # Get full diagnostic info
-#               echo ""
-#               echo "Full Nodegroup Details:"
-#               aws eks describe-nodegroup \
-#                 --cluster-name $CLUSTER_NAME \
-#                 --nodegroup-name $NODEGROUP_NAME \
-#                 --region $AWS_REGION \
-#                 --output json | jq '{status: .nodegroup.status, health: .nodegroup.health, resources: .nodegroup.resources}'
-              
-#               exit 1
-#             fi
-            
-#             # Show detailed info every 10 attempts (every ~3 minutes)
-#             if [ $((i % 10)) -eq 0 ]; then
-#               echo ""
-#               echo "  Detailed Status Check:"
-#               aws eks describe-nodegroup \
-#                 --cluster-name $CLUSTER_NAME \
-#                 --nodegroup-name $NODEGROUP_NAME \
-#                 --region $AWS_REGION \
-#                 --query '{Status:nodegroup.status,Health:nodegroup.health,DesiredSize:nodegroup.scalingConfig.desiredSize}' \
-#                 --output json 2>/dev/null || echo "  Cannot fetch details"
-#             fi
-            
-#             sleep 20
-#           done
-          
-#           if [ "$NODEGROUP_STATUS" != "ACTIVE" ]; then
-#             echo ""
-#             echo "ERROR: Nodegroup did not become ACTIVE after 15 minutes"
-#             echo "Final status: $NODEGROUP_STATUS"
-#             echo ""
-#             echo "This usually indicates:"
-#             echo "  - IAM role issues"
-#             echo "  - VPC/subnet misconfiguration"
-#             echo "  - Service limits reached"
-#             exit 1
-#           fi
-
-#       - name: Update kubeconfig
-#         run: |
-#           aws eks update-kubeconfig --name $CLUSTER_NAME --region $AWS_REGION
-#           echo "Kubeconfig updated successfully!"
-
-#       - name: Wait for nodes to be Ready with detailed diagnostics
-#         run: |
-#           echo "Waiting for Kubernetes nodes to be Ready..."
-          
-#           for i in {1..45}; do
-#             READY_NODES=$(kubectl get nodes --no-headers 2>/dev/null | grep -c ' Ready ' || echo "0")
-#             TOTAL_NODES=$(kubectl get nodes --no-headers 2>/dev/null | wc -l || echo "0")
-#             NOTREADY_NODES=$(kubectl get nodes --no-headers 2>/dev/null | grep -c ' NotReady ' || echo "0")
-            
-#             echo "[$i/45] Ready: $READY_NODES | NotReady: $NOTREADY_NODES | Total: $TOTAL_NODES ($(($i * 20 / 60)) min)"
-            
-#             if [ "$READY_NODES" -ge 1 ]; then
-#               echo ""
-#               echo "✓ $READY_NODES node(s) are ready!"
-#               kubectl get nodes -o wide
-#               break
-#             fi
-            
-#             # Show what's happening every 5 attempts (~2 minutes)
-#             if [ $((i % 5)) -eq 0 ]; then
-#               echo ""
-#               echo "  === Status Check ==="
-              
-#               if [ "$TOTAL_NODES" -eq 0 ]; then
-#                 echo "    NO NODES REGISTERED WITH CLUSTER YET"
-#                 echo "  This means EC2 instances haven't joined the cluster."
-#                 echo ""
-#                 echo "  Checking Auto Scaling Group for EC2 instances..."
-                
-#                 ASG_NAME=$(aws eks describe-nodegroup \
-#                   --cluster-name $CLUSTER_NAME \
-#                   --nodegroup-name ng-1 \
-#                   --region $AWS_REGION \
-#                   --query 'nodegroup.resources.autoScalingGroups[0].name' \
-#                   --output text 2>/dev/null)
-                
-#                 if [ -n "$ASG_NAME" ] && [ "$ASG_NAME" != "None" ]; then
-#                   INSTANCE_COUNT=$(aws autoscaling describe-auto-scaling-groups \
-#                     --auto-scaling-group-names $ASG_NAME \
-#                     --region $AWS_REGION \
-#                     --query 'AutoScalingGroups[0].Instances | length(@)' \
-#                     --output text 2>/dev/null || echo "0")
-                  
-#                   echo "  EC2 instances in ASG: $INSTANCE_COUNT"
-                  
-#                   if [ "$INSTANCE_COUNT" -eq 0 ]; then
-#                     echo "   NO EC2 INSTANCES LAUNCHED"
-#                     echo "  Possible causes:"
-#                     echo "    - Instance type unavailable in the region"
-#                     echo "    - Service quota limits"
-#                     echo "    - Insufficient capacity"
-#                   else
-#                     echo "  EC2 instances exist but haven't joined cluster yet"
-#                     echo "  Possible causes:"
-#                     echo "    - IAM role permissions missing"
-#                     echo "    - VPC/Security group blocking access"
-#                     echo "    - User data script failing"
-                    
-#                     # Show instance details
-#                     aws autoscaling describe-auto-scaling-groups \
-#                       --auto-scaling-group-names $ASG_NAME \
-#                       --region $AWS_REGION \
-#                       --query 'AutoScalingGroups[0].Instances[*].{InstanceId:InstanceId,HealthStatus:HealthStatus,LifecycleState:LifecycleState}' \
-#                       --output table 2>/dev/null || true
-#                   fi
-#                 fi
-#               else
-#                 echo "  Nodes registered but not ready yet:"
-#                 kubectl get nodes 2>/dev/null || true
-                
-#                 echo ""
-#                 echo "  Checking system pods:"
-#                 kubectl get pods -n kube-system --field-selector=status.phase!=Running 2>/dev/null | head -10 || true
-#               fi
-              
-#               echo "  ===================="
-#               echo ""
-#             fi
-            
-#             sleep 20
-#           done
-          
-#           READY_NODES=$(kubectl get nodes --no-headers 2>/dev/null | grep -c ' Ready ' || echo "0")
-#           if [ "$READY_NODES" -lt 1 ]; then
-#             echo ""
-#             echo "======================================"
-#             echo "ERROR: No nodes became Ready after 15 minutes"
-#             echo "======================================"
-#             echo ""
-            
-#             # Final comprehensive diagnostics
-#             echo "=== FINAL DIAGNOSTICS ==="
-#             echo ""
-#             echo "1. Kubernetes Nodes:"
-#             kubectl get nodes -o wide 2>/dev/null || echo "   No nodes visible to kubectl"
-            
-#             echo ""
-#             echo "2. Nodegroup Status:"
-#             aws eks describe-nodegroup \
-#               --cluster-name $CLUSTER_NAME \
-#               --nodegroup-name ng-1 \
-#               --region $AWS_REGION \
-#               --query '{Status:nodegroup.status,Health:nodegroup.health,IAMRole:nodegroup.nodeRole}' \
-#               --output json 2>/dev/null || echo "   Cannot describe nodegroup"
-            
-#             echo ""
-#             echo "3. Auto Scaling Group:"
-#             ASG_NAME=$(aws eks describe-nodegroup \
-#               --cluster-name $CLUSTER_NAME \
-#               --nodegroup-name ng-1 \
-#               --region $AWS_REGION \
-#               --query 'nodegroup.resources.autoScalingGroups[0].name' \
-#               --output text 2>/dev/null)
-            
-#             if [ -n "$ASG_NAME" ] && [ "$ASG_NAME" != "None" ]; then
-#               aws autoscaling describe-auto-scaling-groups \
-#                 --auto-scaling-group-names $ASG_NAME \
-#                 --region $AWS_REGION \
-#                 --query 'AutoScalingGroups[0]' \
-#                 --output json 2>/dev/null || echo "   Cannot describe ASG"
-#             fi
-            
-#             echo ""
-#             echo "4. System Pods:"
-#             kubectl get pods -n kube-system -o wide 2>/dev/null || echo "   Cannot get pods"
-            
-#             echo ""
-#             echo "==========================="
-#             echo ""
-#             echo "TROUBLESHOOTING STEPS:"
-#             echo "1. Check IAM role has required policies (AmazonEKSWorkerNodePolicy, etc.)"
-#             echo "2. Verify VPC subnets have internet access (NAT Gateway for private subnets)"
-#             echo "3. Check security groups allow traffic"
-#             echo "4. Verify instance type is available in your region"
-#             echo "5. Check CloudWatch logs for node bootstrap errors"
-            
-#             exit 1
-#           fi
-
-#       - name: Diagnose cluster health
-#         if: success()
-#         run: |
-#           echo "=== Cluster Health Check ==="
-#           echo ""
-#           echo "Nodes:"
-#           kubectl get nodes -o wide
-#           echo ""
-#           echo "System Pods:"
-#           kubectl get pods -n kube-system
-#           echo ""
-#           echo "Nodegroup Details:"
-#           aws eks describe-nodegroup \
-#             --cluster-name $CLUSTER_NAME \
-#             --nodegroup-name ng-1 \
-#             --region $AWS_REGION \
-#             --query 'nodegroup.{Status:status,Health:health,ScalingConfig:scalingConfig,InstanceTypes:instanceTypes}' \
-#             --output json
-
-#       - name: Fetch ECR repo URIs
-#         id: ecr
-#         run: |
-#           STACK_NAME=${CLUSTER_NAME}-stack
-          
-#           if aws cloudformation describe-stacks --stack-name $STACK_NAME >/dev/null 2>&1; then
-#             FRONTEND=$(aws cloudformation describe-stacks --stack-name $STACK_NAME \
-#               --query 'Stacks[0].Outputs[?OutputKey==`FrontendEcrUri`].OutputValue' --output text)
-#             ISSUANCE=$(aws cloudformation describe-stacks --stack-name $STACK_NAME \
-#               --query 'Stacks[0].Outputs[?OutputKey==`IssuanceEcrUri`].OutputValue' --output text)
-#             VERIFICATION=$(aws cloudformation describe-stacks --stack-name $STACK_NAME \
-#               --query 'Stacks[0].Outputs[?OutputKey==`VerificationEcrUri`].OutputValue' --output text)
-#           else
-#             AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-#             FRONTEND="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${CLUSTER_NAME}-frontend"
-#             ISSUANCE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${CLUSTER_NAME}-issuance"
-#             VERIFICATION="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${CLUSTER_NAME}-verification"
-#           fi
-          
-#           echo "frontend=$FRONTEND" >> $GITHUB_OUTPUT
-#           echo "issuance=$ISSUANCE" >> $GITHUB_OUTPUT
-#           echo "verification=$VERIFICATION" >> $GITHUB_OUTPUT
-
-#       - name: ECR Login
-#         run: aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $(echo "${{ steps.ecr.outputs.frontend }}" | cut -d'/' -f1)
-
-#       - name: Build and push images
-#         run: |
-#           FRONTEND_URI=${{ steps.ecr.outputs.frontend }}
-#           ISSUANCE_URI=${{ steps.ecr.outputs.issuance }}
-#           VERIFICATION_URI=${{ steps.ecr.outputs.verification }}
-
-#           docker build \
-#             --build-arg VITE_ISSUANCE_URL=http://issuance-service:4001 \
-#             --build-arg VITE_VERIFY_URL=http://verification-service:4002 \
-#             -t $FRONTEND_URI:latest ./frontend
-#           docker push $FRONTEND_URI:latest
-
-#           docker build -t $ISSUANCE_URI:latest ./backend/issuance-service
-#           docker push $ISSUANCE_URI:latest
-
-#           docker build -t $VERIFICATION_URI:latest ./backend/verification-service
-#           docker push $VERIFICATION_URI:latest
-
-#       - name: Apply Kubernetes manifests (with image substitution)
-#         run: |
-#           FRONTEND_URI=${{ steps.ecr.outputs.frontend }}
-#           ISSUANCE_URI=${{ steps.ecr.outputs.issuance }}
-#           VERIFICATION_URI=${{ steps.ecr.outputs.verification }}
-
-#           sed "s#yourdockerhub/kube-frontend:latest#$FRONTEND_URI:latest#g" k8s/frontend-deployment.yaml > /tmp/frontend.yaml
-#           sed "s#yourdockerhub/issuance-service:latest#$ISSUANCE_URI:latest#g" k8s/issuance-deployment.yaml > /tmp/issuance.yaml
-#           sed "s#yourdockerhub/verification-service:latest#$VERIFICATION_URI:latest#g" k8s/verification-deployment.yaml > /tmp/verification.yaml
-
-#           echo "Applying Kubernetes manifests..."
-#           kubectl apply -f k8s/mongo-deployment.yaml
-#           kubectl apply -f /tmp/issuance.yaml
-#           kubectl apply -f /tmp/verification.yaml
-#           kubectl apply -f /tmp/frontend.yaml
-          
-#           echo "✓ Manifests applied successfully!"
-
-#       - name: Wait for deployments to be ready
-#         run: |
-#           echo "Waiting for all deployments to be ready..."
-#           kubectl wait --for=condition=available --timeout=300s deployment --all || true
-#           echo ""
-#           echo "Deployment status:"
-#           kubectl get deployments -o wide
-
-#       - name: Show services and pods
-#         run: |
-#           echo "=== Services ==="
-#           kubectl get svc -o wide
-#           echo ""
-#           echo "=== Pods ==="
-#           kubectl get pods -o wide
-#           echo ""
-#           echo "✓ Deployment complete!"
+          echo "Deployment finished."
