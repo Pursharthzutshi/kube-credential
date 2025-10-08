@@ -38,32 +38,55 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Install eksctl
+      - name: Install prerequisites (curl, tar)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y curl tar
+
+      - name: Install eksctl (official latest)
         run: |
           set -euo pipefail
           ARCH=amd64
           PLATFORM=$(uname -s)_$ARCH
-          curl -sLO "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_${PLATFORM}.tar.gz"
-          tar -xzf eksctl_${PLATFORM}.tar.gz -C /tmp && rm eksctl_${PLATFORM}.tar.gz
-          sudo mv /tmp/eksctl /usr/local/bin
+          # Download a recent eksctl release binary (use GitHub releases)
+          curl -sLo /tmp/eksctl.tar.gz "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_${PLATFORM}.tar.gz"
+          tar -xzf /tmp/eksctl.tar.gz -C /tmp
+          sudo mv /tmp/eksctl /usr/local/bin/eksctl
+          rm -f /tmp/eksctl.tar.gz
           eksctl version
 
-      - name: Create EKS cluster (eksctl, waits up to 30m)
+      - name: Create EKS cluster (eksctl — will wait until done)
+        env:
+          NODES: ${{ github.event.inputs.nodes }}
         run: |
           set -euo pipefail
-          echo "Creating cluster ${CLUSTER_NAME} in ${AWS_REGION} (this may take 10-30 minutes)..."
+          echo "Creating cluster ${CLUSTER_NAME} in ${AWS_REGION} (this may take ~10-30 minutes)..."
+          echo "eksctl create cluster --name \"${CLUSTER_NAME}\" --region \"${AWS_REGION}\" --node-type \"${{ github.event.inputs.node-instance-type }}\" --nodes \"${NODES}\" --managed --version 1.29"
+          # Note: omit --wait/--timeout for widest compatibility; eksctl will still wait for creation to finish.
           eksctl create cluster \
             --name "${CLUSTER_NAME}" \
             --region "${AWS_REGION}" \
             --node-type "${{ github.event.inputs.node-instance-type }}" \
-            --nodes "${{ github.event.inputs.nodes }}" \
+            --nodes "${NODES}" \
             --managed \
-            --version 1.29 \
-            --wait \
-            --timeout 30m
+            --version 1.29
 
-      - name: Verify cluster
+      - name: Verify cluster exists
         run: |
           set -euo pipefail
+          echo "Describing cluster ${CLUSTER_NAME}..."
           aws eks describe-cluster --name "${CLUSTER_NAME}" --region "${AWS_REGION}"
-          echo "Cluster should be active now. You can now run the deploy workflow."
+          echo "Cluster creation command completed. If the previous command returned cluster details, cluster is provisioning/active."
+
+      - name: Show nodes (if kubeconfig can be updated)
+        run: |
+          set -euo pipefail
+          echo "Attempting to update kubeconfig and list nodes (may succeed once control plane is ready)..."
+          aws eks update-kubeconfig --name "${CLUSTER_NAME}" --region "${AWS_REGION}" || true
+          kubectl get nodes --no-headers || true
+
+      - name: Final message
+        run: |
+          echo "If this workflow finished without error, the EKS cluster create command returned successfully."
+          echo "It can take several minutes for nodegroups and nodes to become Ready. After the cluster is active, run your deploy workflow (deploy.yml)."
