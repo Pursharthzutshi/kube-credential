@@ -1,18 +1,18 @@
-name: Deploy Issuance Service to AWS App Runner
+name: Deploy Verification Service to AWS App Runner
 
 on:
   push:
     branches:
       - main
     paths:
-      - 'backend/issuance-service/**'
-      - '.github/workflows/deploy-issuance-service.yml'
+      - 'backend/verification-service/**'
+      - '.github/workflows/deploy-verification-service.yml'
   workflow_dispatch:
 
 env:
   AWS_REGION: us-east-1
-  ECR_REPOSITORY: issuance-service
-  APP_RUNNER_SERVICE: issuance-service
+  ECR_REPOSITORY: verification-service
+  APP_RUNNER_SERVICE: verification-service
 
 jobs:
   deploy:
@@ -34,13 +34,21 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Create ECR repository if it doesn't exist
+        run: |
+          aws ecr describe-repositories --repository-names ${{ env.ECR_REPOSITORY }} --region ${{ env.AWS_REGION }} || \
+          aws ecr create-repository \
+            --repository-name ${{ env.ECR_REPOSITORY }} \
+            --region ${{ env.AWS_REGION }} \
+            --image-scanning-configuration scanOnPush=true
+
       - name: Build, tag, and push image to Amazon ECR
         id: build-image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          cd backend/issuance-service
+          cd backend/verification-service
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
@@ -51,20 +59,20 @@ jobs:
         id: deploy-apprunner
         run: |
           aws apprunner update-service \
-            --service-arn ${{ secrets.ISSUANCE_SERVICE_ARN }} \
+            --service-arn ${{ secrets.VERIFICATION_SERVICE_ARN }} \
             --source-configuration "ImageRepository={ImageIdentifier=${{ steps.build-image.outputs.image }},ImageRepositoryType=ECR,ImageConfiguration={Port=3000}}" \
             --region ${{ env.AWS_REGION }}
 
       - name: Wait for deployment
         run: |
           aws apprunner wait service-updated \
-            --service-arn ${{ secrets.ISSUANCE_SERVICE_ARN }} \
+            --service-arn ${{ secrets.VERIFICATION_SERVICE_ARN }} \
             --region ${{ env.AWS_REGION }}
 
       - name: Get service URL
         run: |
           SERVICE_URL=$(aws apprunner describe-service \
-            --service-arn ${{ secrets.ISSUANCE_SERVICE_ARN }} \
+            --service-arn ${{ secrets.VERIFICATION_SERVICE_ARN }} \
             --query 'Service.ServiceUrl' \
             --output text \
             --region ${{ env.AWS_REGION }})
