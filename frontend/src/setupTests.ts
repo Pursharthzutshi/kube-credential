@@ -1,44 +1,7 @@
-// import '@testing-library/jest-dom';
-
-// process.env.VITE_ISSUANCE_URL = 'http://localhost:4001';
-// process.env.VITE_VERIFY_URL = 'http://localhost:4002';
-
-// const originalConsoleError = console.error;
-// const originalConsoleLog = console.log;
-
-// beforeAll(() => {
-//   console.error = (...args: unknown[]) => {
-//     if (
-//       typeof args[0] === 'string' &&
-//       (args[0].includes('Warning:') || args[0].includes('Error:'))
-//     ) {
-//       return;
-//     }
-//     originalConsoleError.call(console, ...args);
-//   };
-  
-//   console.log = () => {
-//     // Suppress console.log in tests unless specifically needed
-//   };
-// });
-
-// afterAll(() => {
-//   console.error = originalConsoleError;
-//   console.log = originalConsoleLog;
-// });
-
 import '@testing-library/jest-dom';
 
-/**
- * Shim process.env for browser-like environments
- * (avoids needing @types/node)
- */
-(globalThis as unknown as { process: { env: Record<string, string> } }).process = {
-  env: {
-    VITE_ISSUANCE_URL: 'http://localhost:4001',
-    VITE_VERIFY_URL: 'http://localhost:4002',
-  },
-};
+process.env.VITE_ISSUANCE_URL = 'http://localhost:4001';
+process.env.VITE_VERIFY_URL = 'http://localhost:4002';
 
 const originalConsoleError = console.error;
 const originalConsoleLog = console.log;
@@ -53,7 +16,7 @@ beforeAll(() => {
     }
     originalConsoleError.call(console, ...args);
   };
-
+  
   console.log = () => {
     // Suppress console.log in tests unless specifically needed
   };
