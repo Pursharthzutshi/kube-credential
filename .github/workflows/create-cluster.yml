@@ -1,0 +1,69 @@
+name: Create EKS Cluster
+on:
+  workflow_dispatch:
+    inputs:
+      aws-region:
+        description: AWS region
+        required: true
+        default: us-east-1
+      cluster-name:
+        description: EKS cluster name
+        required: true
+        default: zupple-eks
+      node-instance-type:
+        description: Node instance type
+        required: true
+        default: t3.medium
+      nodes:
+        description: Number of nodes
+        required: true
+        default: 2
+
+jobs:
+  create-cluster:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      AWS_REGION: ${{ github.event.inputs.aws-region }}
+      CLUSTER_NAME: ${{ github.event.inputs.cluster-name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install eksctl
+        run: |
+          set -euo pipefail
+          ARCH=amd64
+          PLATFORM=$(uname -s)_$ARCH
+          curl -sLO "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_${PLATFORM}.tar.gz"
+          tar -xzf eksctl_${PLATFORM}.tar.gz -C /tmp && rm eksctl_${PLATFORM}.tar.gz
+          sudo mv /tmp/eksctl /usr/local/bin
+          eksctl version
+
+      - name: Create EKS cluster (eksctl, waits up to 30m)
+        run: |
+          set -euo pipefail
+          echo "Creating cluster ${CLUSTER_NAME} in ${AWS_REGION} (this may take 10-30 minutes)..."
+          eksctl create cluster \
+            --name "${CLUSTER_NAME}" \
+            --region "${AWS_REGION}" \
+            --node-type "${{ github.event.inputs.node-instance-type }}" \
+            --nodes "${{ github.event.inputs.nodes }}" \
+            --managed \
+            --version 1.29 \
+            --wait \
+            --timeout 30m
+
+      - name: Verify cluster
+        run: |
+          set -euo pipefail
+          aws eks describe-cluster --name "${CLUSTER_NAME}" --region "${AWS_REGION}"
+          echo "Cluster should be active now. You can now run the deploy workflow."
