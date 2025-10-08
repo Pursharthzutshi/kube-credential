@@ -25,21 +25,34 @@ export interface VerificationPayload {
   id: string;
 }
 
-// Backend Response Types
+// Credential Data Type (what tests expect)
+export interface CredentialData {
+  id: string;
+  holder: string;
+  issuedAt?: string;
+  name?: string;
+  email?: string;
+  role?: string;
+  metadata?: Record<string, unknown>;
+}
+
+// Backend Response Types (what the API actually returns)
 export interface IssuanceResponse {
   message: string;
   workerId: string;
   issuedAt?: string;
+  credential?: CredentialData;
 }
 
 export interface VerificationResponse {
-  verified: boolean;
+  valid: boolean;
   workerId?: string;
   issuedAt?: string;
   error?: string;
+  credential?: CredentialData;
 }
 
-// Component State Types
+// Component State Types (what components actually use)
 export interface IssuanceResult {
   ok?: boolean;
   data?: IssuanceResponse;
@@ -47,7 +60,7 @@ export interface IssuanceResult {
   status?: number;
 }
 
-export interface VerificationResultState {
+export interface VerificationResult {
   ok?: boolean;
   data?: VerificationResponse;
   error?: string | ErrorResponse;

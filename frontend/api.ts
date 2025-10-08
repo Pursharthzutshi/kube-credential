@@ -3,11 +3,10 @@ import type {
   CredentialPayload, 
   VerificationPayload, 
   ApiResponse, 
-  IssuanceResponse, 
-  VerificationResponse,
+  IssuanceResult, 
+  VerificationResult
 } from './types';
 
-// For Vite use import.meta.env, for CRA use process.env, for Next.js use process.env.NEXT_PUBLIC_...
 const ISSUANCE_BASE = import.meta.env.VITE_ISSUANCE_URL || 'http://localhost:4001';
 const VERIFY_BASE = import.meta.env.VITE_VERIFY_URL || 'http://localhost:4002';
 
@@ -16,14 +15,21 @@ const axiosInstance = axios.create({
   headers: { 'Content-Type': 'application/json' }
 });
 
-export async function issueCredential(payload: CredentialPayload): Promise<ApiResponse<IssuanceResponse>> {
+
+export async function issueCredential(
+  payload: CredentialPayload
+): Promise<ApiResponse<IssuanceResult>> {
   try {
     const { data } = await axiosInstance.post(`${ISSUANCE_BASE}/issue`, payload);
     return { ok: true, data };
   } catch (err) {
     const axiosError = err as AxiosError;
-    // Normalize error for frontend
-    console.error('issueCredential error', axiosError?.response?.status, axiosError?.message, axiosError?.response?.data);
+    console.error(
+      'issueCredential error',
+      axiosError?.response?.status,
+      axiosError?.message,
+      axiosError?.response?.data
+    );
     return {
       ok: false,
       status: axiosError?.response?.status || null,
@@ -32,13 +38,21 @@ export async function issueCredential(payload: CredentialPayload): Promise<ApiRe
   }
 }
 
-export async function verifyCredential(payload: VerificationPayload): Promise<ApiResponse<VerificationResponse>> {
+
+export async function verifyCredential(
+  payload: VerificationPayload
+): Promise<ApiResponse<VerificationResult>> {
   try {
     const { data } = await axiosInstance.post(`${VERIFY_BASE}/verify`, payload);
     return { ok: true, data };
   } catch (err) {
     const axiosError = err as AxiosError;
-    console.error('verifyCredential error', axiosError?.response?.status, axiosError?.message, axiosError?.response?.data);
+    console.error(
+      'verifyCredential error',
+      axiosError?.response?.status,
+      axiosError?.message,
+      axiosError?.response?.data
+    );
     return {
       ok: false,
       status: axiosError?.response?.status || null,

@@ -1,12 +1,11 @@
 import { useState } from 'react';
-import { issueCredential } from '../../api';
-import type { IssuanceResult } from '../types';
+import { issueCredential } from '../api.ts';
 
 export default function IssuePage() {
   const [id, setId] = useState('');
   const [holder, setHolder] = useState('');
   const [subject, setSubject] = useState('{}');
-  const [result, setResult] = useState<IssuanceResult | null>(null);
+  const [result, setResult] = useState<any>(null);
   const [loading, setLoading] = useState(false);
 
   const handleIssue = async () => {
@@ -22,9 +21,8 @@ export default function IssuePage() {
       };
       const data = await issueCredential(payload);
       setResult(data);
-    } catch (err) {
-      const error = err as Error;
-      setResult({ error: error?.message || String(err) });
+    } catch (err: any) {
+      setResult({ error: err?.message || String(err) });
     } finally {
       setLoading(false);
     }
