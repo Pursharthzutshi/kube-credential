@@ -1,4 +1,4 @@
-name: Deploy Verification Service to ECS Fargate
+name: Deploy Services to ECS Fargate
 
 on:
   push:
@@ -6,22 +6,37 @@ on:
       - main
     paths:
       - 'backend/verification-service/**'
+      - 'backend/issuance-service/**'
       - '.github/workflows/deploy-verification-ecs.yml'
   workflow_dispatch:
 
 env:
   AWS_REGION: us-east-1
-  ECR_REPOSITORY: verification-service
-  ECS_CLUSTER: zupple-cluster
-  ECS_SERVICE: verification-service
-  ECS_TASK_DEFINITION: verification-task
-  CONTAINER_NAME: verification-service
 
 jobs:
   deploy:
-    name: Deploy to ECS
+    name: Deploy to ECS (per service)
     runs-on: ubuntu-latest
-    
+    strategy:
+      matrix:
+        include:
+          - service: verification
+            ecr_repository: verification-service
+            directory: verification-service
+            ecs_cluster: zupple-cluster
+            ecs_service: verification-service
+            task_definition: verification-task
+            container_name: verification-service
+            container_port: 3000
+          - service: issuance
+            ecr_repository: issuance-service
+            directory: issuance-service
+            ecs_cluster: zupple-cluster
+            ecs_service: issuance-service
+            task_definition: issuance-task
+            container_name: issuance-service
+            container_port: 3000
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -39,9 +54,9 @@ jobs:
 
       - name: Create ECR repository if it doesn't exist
         run: |
-          aws ecr describe-repositories --repository-names ${{ env.ECR_REPOSITORY }} --region ${{ env.AWS_REGION }} || \
+          aws ecr describe-repositories --repository-names ${{ matrix.ecr_repository }} --region ${{ env.AWS_REGION }} || \
           aws ecr create-repository \
-            --repository-name ${{ env.ECR_REPOSITORY }} \
+            --repository-name ${{ matrix.ecr_repository }} \
             --region ${{ env.AWS_REGION }} \
             --image-scanning-configuration scanOnPush=true
 
@@ -51,18 +66,17 @@ jobs:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          cd backend/verification-service
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
-          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+          cd backend/${{ matrix.directory }}
+          docker build -t $ECR_REGISTRY/${{ matrix.ecr_repository }}:$IMAGE_TAG .
+          docker tag $ECR_REGISTRY/${{ matrix.ecr_repository }}:$IMAGE_TAG $ECR_REGISTRY/${{ matrix.ecr_repository }}:latest
+          docker push $ECR_REGISTRY/${{ matrix.ecr_repository }}:$IMAGE_TAG
+          docker push $ECR_REGISTRY/${{ matrix.ecr_repository }}:latest
+          echo "image=$ECR_REGISTRY/${{ matrix.ecr_repository }}:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
       - name: Setup infrastructure and get IDs
         id: get-infra
         run: |
-          if ! aws ecs describe-clusters --clusters ${{ env.ECS_CLUSTER }} --region ${{ env.AWS_REGION }} --query 'clusters[0].status' --output text 2>/dev/null | grep -q ACTIVE; then
-            echo "Setting up ECS infrastructure..."
+          if ! aws ecs describe-clusters --clusters ${{ matrix.ecs_cluster }} --region ${{ env.AWS_REGION }} --query 'clusters[0].status' --output text 2>/dev/null | grep -q ACTIVE; then
             VPC_ID=$(aws ec2 create-vpc --cidr-block 10.0.0.0/16 --region ${{ env.AWS_REGION }} --query 'Vpc.VpcId' --output text)
             aws ec2 create-tags --resources $VPC_ID --tags Key=Name,Value=zupple-vpc --region ${{ env.AWS_REGION }}
             aws ec2 modify-vpc-attribute --vpc-id $VPC_ID --enable-dns-hostnames --region ${{ env.AWS_REGION }}
@@ -80,7 +94,7 @@ jobs:
             SG_ID=$(aws ec2 create-security-group --group-name zupple-ecs-sg --description "Security group for Zupple ECS services" --vpc-id $VPC_ID --region ${{ env.AWS_REGION }} --query 'GroupId' --output text)
             aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port 3000 --cidr 0.0.0.0/0 --region ${{ env.AWS_REGION }}
             aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port 80 --cidr 0.0.0.0/0 --region ${{ env.AWS_REGION }}
-            aws ecs create-cluster --cluster-name ${{ env.ECS_CLUSTER }} --region ${{ env.AWS_REGION }}
+            aws ecs create-cluster --cluster-name ${{ matrix.ecs_cluster }} --region ${{ env.AWS_REGION }}
             aws iam create-role --role-name ecsTaskExecutionRole --assume-role-policy-document '{
               "Version": "2012-10-17",
               "Statement": [{
@@ -98,13 +112,11 @@ jobs:
                 "Resource": "arn:aws:logs:*:*:*"
               }]
             }' 2>/dev/null || true
-            echo " Infrastructure created"
             echo "vpc_id=$VPC_ID" >> $GITHUB_OUTPUT
             echo "subnet1_id=$SUBNET1_ID" >> $GITHUB_OUTPUT
             echo "subnet2_id=$SUBNET2_ID" >> $GITHUB_OUTPUT
             echo "sg_id=$SG_ID" >> $GITHUB_OUTPUT
           else
-            echo "Infrastructure already exists, retrieving IDs..."
             VPC_ID=$(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=zupple-vpc" --region ${{ env.AWS_REGION }} --query 'Vpcs[0].VpcId' --output text)
             SUBNET1_ID=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" "Name=availability-zone,Values=${AWS_REGION}a" --region ${{ env.AWS_REGION }} --query 'Subnets[0].SubnetId' --output text)
             SUBNET2_ID=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" "Name=availability-zone,Values=${AWS_REGION}b" --region ${{ env.AWS_REGION }} --query 'Subnets[0].SubnetId' --output text)
@@ -122,7 +134,7 @@ jobs:
           
           cat > task-definition.json <<EOF
           {
-            "family": "${{ env.ECS_TASK_DEFINITION }}",
+            "family": "${{ matrix.task_definition }}",
             "networkMode": "awsvpc",
             "requiresCompatibilities": ["FARGATE"],
             "cpu": "256",
@@ -130,9 +142,9 @@ jobs:
             "executionRoleArn": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/ecsTaskExecutionRole",
             "containerDefinitions": [
               {
-                "name": "${{ env.CONTAINER_NAME }}",
+                "name": "${{ matrix.container_name }}",
                 "image": "${{ steps.build-image.outputs.image }}",
-                "portMappings": [{ "containerPort": 3000, "protocol": "tcp" }],
+                "portMappings": [{ "containerPort": ${{ matrix.container_port }}, "protocol": "tcp" }],
                 "environment": [
                   {
                     "name": "MONGO_URI",
@@ -147,7 +159,7 @@ jobs:
                 "logConfiguration": {
                   "logDriver": "awslogs",
                   "options": {
-                    "awslogs-group": "/ecs/${{ env.ECS_TASK_DEFINITION }}",
+                    "awslogs-group": "/ecs/${{ matrix.task_definition }}",
                     "awslogs-region": "${{ env.AWS_REGION }}",
                     "awslogs-stream-prefix": "ecs",
                     "awslogs-create-group": "true"
@@ -162,20 +174,18 @@ jobs:
 
       - name: Create or Update ECS Service
         run: |
-          if aws ecs describe-services --cluster ${{ env.ECS_CLUSTER }} --services ${{ env.ECS_SERVICE }} --region ${{ env.AWS_REGION }} --query 'services[0].status' --output text | grep -q ACTIVE; then
-            echo "Updating existing service..."
+          if aws ecs describe-services --cluster ${{ matrix.ecs_cluster }} --services ${{ matrix.ecs_service }} --region ${{ env.AWS_REGION }} --query 'services[0].status' --output text | grep -q ACTIVE; then
             aws ecs update-service \
-              --cluster ${{ env.ECS_CLUSTER }} \
-              --service ${{ env.ECS_SERVICE }} \
-              --task-definition ${{ env.ECS_TASK_DEFINITION }} \
+              --cluster ${{ matrix.ecs_cluster }} \
+              --service ${{ matrix.ecs_service }} \
+              --task-definition ${{ matrix.task_definition }} \
               --force-new-deployment \
               --region ${{ env.AWS_REGION }}
           else
-            echo "Creating new service..."
             aws ecs create-service \
-              --cluster ${{ env.ECS_CLUSTER }} \
-              --service-name ${{ env.ECS_SERVICE }} \
-              --task-definition ${{ env.ECS_TASK_DEFINITION }} \
+              --cluster ${{ matrix.ecs_cluster }} \
+              --service-name ${{ matrix.ecs_service }} \
+              --task-definition ${{ matrix.task_definition }} \
               --desired-count 1 \
               --launch-type FARGATE \
               --network-configuration "awsvpcConfiguration={subnets=[${{ steps.get-infra.outputs.subnet1_id }},${{ steps.get-infra.outputs.subnet2_id }}],securityGroups=[${{ steps.get-infra.outputs.sg_id }}],assignPublicIp=ENABLED}" \
@@ -184,18 +194,17 @@ jobs:
 
       - name: Wait for service stability
         run: |
-          echo "Waiting for service to stabilize..."
           aws ecs wait services-stable \
-            --cluster ${{ env.ECS_CLUSTER }} \
-            --services ${{ env.ECS_SERVICE }} \
+            --cluster ${{ matrix.ecs_cluster }} \
+            --services ${{ matrix.ecs_service }} \
             --region ${{ env.AWS_REGION }}
 
       - name: Get service info
         run: |
-          TASK_ARN=$(aws ecs list-tasks --cluster ${{ env.ECS_CLUSTER }} --service-name ${{ env.ECS_SERVICE }} --region ${{ env.AWS_REGION }} --query 'taskArns[0]' --output text)
+          TASK_ARN=$(aws ecs list-tasks --cluster ${{ matrix.ecs_cluster }} --service-name ${{ matrix.ecs_service }} --region ${{ env.AWS_REGION }} --query 'taskArns[0]' --output text)
           if [ -n "$TASK_ARN" ]; then
-            ENI_ID=$(aws ecs describe-tasks --cluster ${{ env.ECS_CLUSTER }} --tasks $TASK_ARN --region ${{ env.AWS_REGION }} --query 'tasks[0].attachments[0].details[?name==\`networkInterfaceId\`].value' --output text)
+            ENI_ID=$(aws ecs describe-tasks --cluster ${{ matrix.ecs_cluster }} --tasks $TASK_ARN --region ${{ env.AWS_REGION }} --query 'tasks[0].attachments[0].details[?name==\`networkInterfaceId\`].value' --output text)
             PUBLIC_IP=$(aws ec2 describe-network-interfaces --network-interface-ids $ENI_ID --region ${{ env.AWS_REGION }} --query 'NetworkInterfaces[0].Association.PublicIp' --output text)
-            echo " Service deployed successfully!"
-            echo " Access URL: http://$PUBLIC_IP:3000"
+            echo "Service ${{ matrix.ecs_service }} deployed successfully!"
+            echo "Access URL: http://$PUBLIC_IP:${{ matrix.container_port }}"
           fi
