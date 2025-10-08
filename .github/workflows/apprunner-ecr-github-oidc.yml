@@ -106,7 +106,23 @@ jobs:
               }]
             }' 2>/dev/null || true
             
+            # Attach ECS execution policy
             aws iam attach-role-policy --role-name ecsTaskExecutionRole --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy 2>/dev/null || true
+            
+            # Create and attach CloudWatch Logs policy
+            aws iam put-role-policy --role-name ecsTaskExecutionRole --policy-name CloudWatchLogsPolicy --policy-document '{
+              "Version": "2012-10-17",
+              "Statement": [{
+                "Effect": "Allow",
+                "Action": [
+                  "logs:CreateLogGroup",
+                  "logs:CreateLogStream",
+                  "logs:PutLogEvents",
+                  "logs:DescribeLogStreams"
+                ],
+                "Resource": "arn:aws:logs:*:*:*"
+              }]
+            }' 2>/dev/null || true
             
             echo "✅ Infrastructure created"
             echo "vpc_id=$VPC_ID" >> $GITHUB_OUTPUT
