@@ -1029,7 +1029,6 @@
 
 
 
-
 name: Deploy to EKS
 
 on:
@@ -1135,11 +1134,45 @@ jobs:
             echo "Cluster status: $CLUSTER_STATUS"
           fi
 
-      - name: Create nodegroup if not exists
+      - name: List existing nodegroups and create if needed
         run: |
+          echo "========================================="
+          echo "Checking existing nodegroups..."
+          echo "========================================="
+          
+          # List all nodegroups for this cluster
+          EXISTING_NODEGROUPS=$(aws eks list-nodegroups \
+            --cluster-name $CLUSTER_NAME \
+            --region $AWS_REGION \
+            --output text 2>&1)
+          
+          if echo "$EXISTING_NODEGROUPS" | grep -q "ResourceNotFoundException"; then
+            echo "ERROR: Cluster $CLUSTER_NAME not found!"
+            echo "Available clusters:"
+            aws eks list-clusters --region $AWS_REGION --output json
+            exit 1
+          elif echo "$EXISTING_NODEGROUPS" | grep -q "AccessDenied"; then
+            echo "ERROR: Permission denied to list nodegroups"
+            echo "Check IAM permissions for eks:ListNodegroups"
+            exit 1
+          else
+            echo "Existing nodegroups in cluster $CLUSTER_NAME:"
+            echo "$EXISTING_NODEGROUPS"
+          fi
+          
           NODEGROUP_NAME=ng-1
-          if ! aws eks describe-nodegroup --cluster-name $CLUSTER_NAME --nodegroup-name $NODEGROUP_NAME --region $AWS_REGION >/dev/null 2>&1; then
-            echo "Nodegroup $NODEGROUP_NAME does not exist. Creating..."
+          
+          # Check if our specific nodegroup exists
+          if ! aws eks describe-nodegroup \
+            --cluster-name $CLUSTER_NAME \
+            --nodegroup-name $NODEGROUP_NAME \
+            --region $AWS_REGION >/dev/null 2>&1; then
+            
+            echo ""
+            echo "Nodegroup '$NODEGROUP_NAME' does not exist. Creating..."
+            echo ""
+            
+            # Create nodegroup with verbose output
             eksctl create nodegroup \
               --cluster $CLUSTER_NAME \
               --region $AWS_REGION \
@@ -1148,46 +1181,128 @@ jobs:
               --nodes 2 \
               --nodes-min 1 \
               --nodes-max 3 \
-              --managed
-            echo "Nodegroup $NODEGROUP_NAME creation initiated!"
+              --managed \
+              --verbose 4
+            
+            EXIT_CODE=$?
+            
+            if [ $EXIT_CODE -ne 0 ]; then
+              echo ""
+              echo "ERROR: eksctl create nodegroup failed with exit code $EXIT_CODE"
+              echo ""
+              echo "Checking if nodegroup was partially created..."
+              aws eks list-nodegroups --cluster-name $CLUSTER_NAME --region $AWS_REGION
+              exit 1
+            fi
+            
+            echo ""
+            echo "✓ Nodegroup creation command completed"
+            
+            # Verify it was actually created
+            if aws eks describe-nodegroup \
+              --cluster-name $CLUSTER_NAME \
+              --nodegroup-name $NODEGROUP_NAME \
+              --region $AWS_REGION >/dev/null 2>&1; then
+              echo "✓ Nodegroup '$NODEGROUP_NAME' confirmed to exist"
+            else
+              echo "WARNING: Nodegroup creation command succeeded but nodegroup not found!"
+              echo "Listing all nodegroups again:"
+              aws eks list-nodegroups --cluster-name $CLUSTER_NAME --region $AWS_REGION
+            fi
           else
-            echo "Nodegroup $NODEGROUP_NAME already exists."
+            echo ""
+            echo "✓ Nodegroup '$NODEGROUP_NAME' already exists"
+            
+            # Show current status
+            CURRENT_STATUS=$(aws eks describe-nodegroup \
+              --cluster-name $CLUSTER_NAME \
+              --nodegroup-name $NODEGROUP_NAME \
+              --region $AWS_REGION \
+              --query 'nodegroup.status' \
+              --output text)
+            echo "  Current status: $CURRENT_STATUS"
           fi
 
       - name: Wait for nodegroup to be ACTIVE and diagnose issues
         run: |
           NODEGROUP_NAME=ng-1
+          echo "========================================="
           echo "Waiting for nodegroup to reach ACTIVE status..."
+          echo "========================================="
+          
+          # First, verify we can even describe the nodegroup
+          echo "Verifying nodegroup exists..."
+          if ! aws eks describe-nodegroup \
+            --cluster-name $CLUSTER_NAME \
+            --nodegroup-name $NODEGROUP_NAME \
+            --region $AWS_REGION >/dev/null 2>&1; then
+            
+            echo ""
+            echo "ERROR: Cannot describe nodegroup '$NODEGROUP_NAME'"
+            echo ""
+            echo "Available nodegroups in cluster:"
+            aws eks list-nodegroups --cluster-name $CLUSTER_NAME --region $AWS_REGION --output json
+            
+            echo ""
+            echo "Cluster details:"
+            aws eks describe-cluster --name $CLUSTER_NAME --region $AWS_REGION --query 'cluster.{Name:name,Status:status,Endpoint:endpoint}' --output json
+            
+            exit 1
+          fi
+          
+          echo "✓ Nodegroup exists and is accessible"
+          echo ""
           
           for i in {1..45}; do
-            NODEGROUP_STATUS=$(aws eks describe-nodegroup \
+            # Get nodegroup status with error handling
+            DESCRIBE_OUTPUT=$(aws eks describe-nodegroup \
               --cluster-name $CLUSTER_NAME \
               --nodegroup-name $NODEGROUP_NAME \
               --region $AWS_REGION \
-              --query 'nodegroup.status' \
-              --output text 2>/dev/null || echo "UNKNOWN")
+              --output json 2>&1)
             
-            echo "[$i/45] Nodegroup status: $NODEGROUP_STATUS ($(($i * 20 / 60)) min)"
+            if echo "$DESCRIBE_OUTPUT" | grep -q "ResourceNotFoundException"; then
+              echo "[$i/45] ERROR: Nodegroup disappeared! It may have been deleted."
+              exit 1
+            elif echo "$DESCRIBE_OUTPUT" | grep -q "error"; then
+              echo "[$i/45] AWS API Error: $DESCRIBE_OUTPUT"
+              sleep 20
+              continue
+            fi
+            
+            NODEGROUP_STATUS=$(echo "$DESCRIBE_OUTPUT" | jq -r '.nodegroup.status // "UNKNOWN"')
+            HEALTH_ISSUES=$(echo "$DESCRIBE_OUTPUT" | jq -r '.nodegroup.health.issues // []' | jq length)
+            
+            echo "[$i/45] Nodegroup status: $NODEGROUP_STATUS ($(($i * 20 / 60)) min, Health issues: $HEALTH_ISSUES)"
             
             if [ "$NODEGROUP_STATUS" = "ACTIVE" ]; then
+              echo ""
               echo "✓ Nodegroup is ACTIVE!"
+              echo ""
+              
+              # Show nodegroup details
+              echo "$DESCRIBE_OUTPUT" | jq '{
+                status: .nodegroup.status,
+                health: .nodegroup.health,
+                scalingConfig: .nodegroup.scalingConfig,
+                instanceTypes: .nodegroup.instanceTypes,
+                subnets: .nodegroup.subnets,
+                nodeRole: .nodegroup.nodeRole
+              }'
               
               # Verify nodes are actually launching
               echo ""
               echo "Checking Auto Scaling Group..."
-              ASG_NAME=$(aws eks describe-nodegroup \
-                --cluster-name $CLUSTER_NAME \
-                --nodegroup-name $NODEGROUP_NAME \
-                --region $AWS_REGION \
-                --query 'nodegroup.resources.autoScalingGroups[0].name' \
-                --output text 2>/dev/null)
+              ASG_NAME=$(echo "$DESCRIBE_OUTPUT" | jq -r '.nodegroup.resources.autoScalingGroups[0].name // ""')
               
-              if [ -n "$ASG_NAME" ] && [ "$ASG_NAME" != "None" ]; then
+              if [ -n "$ASG_NAME" ] && [ "$ASG_NAME" != "null" ]; then
                 aws autoscaling describe-auto-scaling-groups \
                   --auto-scaling-group-names $ASG_NAME \
                   --region $AWS_REGION \
-                  --query 'AutoScalingGroups[0].{DesiredCapacity:DesiredCapacity,MinSize:MinSize,MaxSize:MaxSize,Instances:Instances[*].{InstanceId:InstanceId,HealthStatus:HealthStatus,LifecycleState:LifecycleState}}' \
+                  --query 'AutoScalingGroups[0].{DesiredCapacity:DesiredCapacity,Instances:Instances[*].{InstanceId:InstanceId,HealthStatus:HealthStatus,LifecycleState:LifecycleState}}' \
                   --output json
+              else
+                echo "WARNING: No Auto Scaling Group found for nodegroup"
               fi
               break
             fi
@@ -1198,42 +1313,50 @@ jobs:
               echo "ERROR: Nodegroup is in $NODEGROUP_STATUS state"
               echo "======================================"
               
-              # Get full diagnostic info
-              echo ""
-              echo "Full Nodegroup Details:"
-              aws eks describe-nodegroup \
-                --cluster-name $CLUSTER_NAME \
-                --nodegroup-name $NODEGROUP_NAME \
-                --region $AWS_REGION \
-                --output json | jq '{status: .nodegroup.status, health: .nodegroup.health, resources: .nodegroup.resources}'
+              echo "$DESCRIBE_OUTPUT" | jq '{
+                status: .nodegroup.status,
+                health: .nodegroup.health,
+                resources: .nodegroup.resources
+              }'
               
               exit 1
             fi
             
-            # Show detailed info every 10 attempts (every ~3 minutes)
-            if [ $((i % 10)) -eq 0 ]; then
+            # Show detailed info every 5 attempts
+            if [ $((i % 5)) -eq 0 ]; then
               echo ""
-              echo "  Detailed Status Check:"
-              aws eks describe-nodegroup \
-                --cluster-name $CLUSTER_NAME \
-                --nodegroup-name $NODEGROUP_NAME \
-                --region $AWS_REGION \
-                --query '{Status:nodegroup.status,Health:nodegroup.health,DesiredSize:nodegroup.scalingConfig.desiredSize}' \
-                --output json 2>/dev/null || echo "  Cannot fetch details"
+              echo "  Detailed Status:"
+              echo "$DESCRIBE_OUTPUT" | jq '{Status:.nodegroup.status,Health:.nodegroup.health,Desired:.nodegroup.scalingConfig.desiredSize}' 2>/dev/null || echo "  Cannot parse nodegroup details"
+              
+              if [ "$HEALTH_ISSUES" -gt 0 ]; then
+                echo ""
+                echo "  Health Issues:"
+                echo "$DESCRIBE_OUTPUT" | jq '.nodegroup.health.issues' 2>/dev/null || echo "  Cannot parse health issues"
+              fi
             fi
             
             sleep 20
           done
           
-          if [ "$NODEGROUP_STATUS" != "ACTIVE" ]; then
+          # Final check
+          FINAL_STATUS=$(aws eks describe-nodegroup \
+            --cluster-name $CLUSTER_NAME \
+            --nodegroup-name $NODEGROUP_NAME \
+            --region $AWS_REGION \
+            --query 'nodegroup.status' \
+            --output text 2>/dev/null || echo "UNKNOWN")
+          
+          if [ "$FINAL_STATUS" != "ACTIVE" ]; then
             echo ""
             echo "ERROR: Nodegroup did not become ACTIVE after 15 minutes"
-            echo "Final status: $NODEGROUP_STATUS"
+            echo "Final status: $FINAL_STATUS"
             echo ""
-            echo "This usually indicates:"
-            echo "  - IAM role issues"
-            echo "  - VPC/subnet misconfiguration"
-            echo "  - Service limits reached"
+            echo "Full nodegroup details:"
+            aws eks describe-nodegroup \
+              --cluster-name $CLUSTER_NAME \
+              --nodegroup-name $NODEGROUP_NAME \
+              --region $AWS_REGION \
+              --output json
             exit 1
           fi
 
@@ -1242,31 +1365,83 @@ jobs:
           aws eks update-kubeconfig --name $CLUSTER_NAME --region $AWS_REGION
           echo "Kubeconfig updated successfully!"
 
-      - name: Wait for nodes to be Ready
+      - name: Wait for nodes to be Ready with detailed diagnostics
         run: |
           echo "Waiting for Kubernetes nodes to be Ready..."
           
-          for i in {1..60}; do
+          for i in {1..45}; do
             READY_NODES=$(kubectl get nodes --no-headers 2>/dev/null | grep -c ' Ready ' || echo "0")
             TOTAL_NODES=$(kubectl get nodes --no-headers 2>/dev/null | wc -l || echo "0")
+            NOTREADY_NODES=$(kubectl get nodes --no-headers 2>/dev/null | grep -c ' NotReady ' || echo "0")
             
-            echo "[$i/60] Ready nodes: $READY_NODES/$TOTAL_NODES"
+            echo "[$i/45] Ready: $READY_NODES | NotReady: $NOTREADY_NODES | Total: $TOTAL_NODES ($(($i * 20 / 60)) min)"
             
             if [ "$READY_NODES" -ge 1 ]; then
-              echo "✓ $READY_NODES node(s) are ready!"
               echo ""
+              echo "✓ $READY_NODES node(s) are ready!"
               kubectl get nodes -o wide
               break
             fi
             
-            # Show detailed status every 5 attempts
+            # Show what's happening every 5 attempts (~2 minutes)
             if [ $((i % 5)) -eq 0 ]; then
-              echo "  Current node status:"
-              kubectl get nodes 2>/dev/null || echo "  No nodes registered yet"
+              echo ""
+              echo "  === Status Check ==="
               
-              # Check for pods that might be having issues
-              echo "  System pod status:"
-              kubectl get pods -n kube-system --field-selector=status.phase!=Running 2>/dev/null | head -10 || true
+              if [ "$TOTAL_NODES" -eq 0 ]; then
+                echo "    NO NODES REGISTERED WITH CLUSTER YET"
+                echo "  This means EC2 instances haven't joined the cluster."
+                echo ""
+                echo "  Checking Auto Scaling Group for EC2 instances..."
+                
+                ASG_NAME=$(aws eks describe-nodegroup \
+                  --cluster-name $CLUSTER_NAME \
+                  --nodegroup-name ng-1 \
+                  --region $AWS_REGION \
+                  --query 'nodegroup.resources.autoScalingGroups[0].name' \
+                  --output text 2>/dev/null)
+                
+                if [ -n "$ASG_NAME" ] && [ "$ASG_NAME" != "None" ]; then
+                  INSTANCE_COUNT=$(aws autoscaling describe-auto-scaling-groups \
+                    --auto-scaling-group-names $ASG_NAME \
+                    --region $AWS_REGION \
+                    --query 'AutoScalingGroups[0].Instances | length(@)' \
+                    --output text 2>/dev/null || echo "0")
+                  
+                  echo "  EC2 instances in ASG: $INSTANCE_COUNT"
+                  
+                  if [ "$INSTANCE_COUNT" -eq 0 ]; then
+                    echo "   NO EC2 INSTANCES LAUNCHED"
+                    echo "  Possible causes:"
+                    echo "    - Instance type unavailable in the region"
+                    echo "    - Service quota limits"
+                    echo "    - Insufficient capacity"
+                  else
+                    echo "  EC2 instances exist but haven't joined cluster yet"
+                    echo "  Possible causes:"
+                    echo "    - IAM role permissions missing"
+                    echo "    - VPC/Security group blocking access"
+                    echo "    - User data script failing"
+                    
+                    # Show instance details
+                    aws autoscaling describe-auto-scaling-groups \
+                      --auto-scaling-group-names $ASG_NAME \
+                      --region $AWS_REGION \
+                      --query 'AutoScalingGroups[0].Instances[*].{InstanceId:InstanceId,HealthStatus:HealthStatus,LifecycleState:LifecycleState}' \
+                      --output table 2>/dev/null || true
+                  fi
+                fi
+              else
+                echo "  Nodes registered but not ready yet:"
+                kubectl get nodes 2>/dev/null || true
+                
+                echo ""
+                echo "  Checking system pods:"
+                kubectl get pods -n kube-system --field-selector=status.phase!=Running 2>/dev/null | head -10 || true
+              fi
+              
+              echo "  ===================="
+              echo ""
             fi
             
             sleep 20
@@ -1275,17 +1450,57 @@ jobs:
           READY_NODES=$(kubectl get nodes --no-headers 2>/dev/null | grep -c ' Ready ' || echo "0")
           if [ "$READY_NODES" -lt 1 ]; then
             echo ""
-            echo "ERROR: No nodes became Ready after 20 minutes"
+            echo "======================================"
+            echo "ERROR: No nodes became Ready after 15 minutes"
+            echo "======================================"
             echo ""
-            echo "=== Final Diagnostics ==="
-            echo "Nodes:"
-            kubectl get nodes -o wide 2>/dev/null || echo "Cannot get nodes"
+            
+            # Final comprehensive diagnostics
+            echo "=== FINAL DIAGNOSTICS ==="
             echo ""
-            echo "Node details:"
-            kubectl describe nodes 2>/dev/null || echo "Cannot describe nodes"
+            echo "1. Kubernetes Nodes:"
+            kubectl get nodes -o wide 2>/dev/null || echo "   No nodes visible to kubectl"
+            
             echo ""
-            echo "System pods:"
-            kubectl get pods -n kube-system -o wide 2>/dev/null || echo "Cannot get pods"
+            echo "2. Nodegroup Status:"
+            aws eks describe-nodegroup \
+              --cluster-name $CLUSTER_NAME \
+              --nodegroup-name ng-1 \
+              --region $AWS_REGION \
+              --query '{Status:nodegroup.status,Health:nodegroup.health,IAMRole:nodegroup.nodeRole}' \
+              --output json 2>/dev/null || echo "   Cannot describe nodegroup"
+            
+            echo ""
+            echo "3. Auto Scaling Group:"
+            ASG_NAME=$(aws eks describe-nodegroup \
+              --cluster-name $CLUSTER_NAME \
+              --nodegroup-name ng-1 \
+              --region $AWS_REGION \
+              --query 'nodegroup.resources.autoScalingGroups[0].name' \
+              --output text 2>/dev/null)
+            
+            if [ -n "$ASG_NAME" ] && [ "$ASG_NAME" != "None" ]; then
+              aws autoscaling describe-auto-scaling-groups \
+                --auto-scaling-group-names $ASG_NAME \
+                --region $AWS_REGION \
+                --query 'AutoScalingGroups[0]' \
+                --output json 2>/dev/null || echo "   Cannot describe ASG"
+            fi
+            
+            echo ""
+            echo "4. System Pods:"
+            kubectl get pods -n kube-system -o wide 2>/dev/null || echo "   Cannot get pods"
+            
+            echo ""
+            echo "==========================="
+            echo ""
+            echo "TROUBLESHOOTING STEPS:"
+            echo "1. Check IAM role has required policies (AmazonEKSWorkerNodePolicy, etc.)"
+            echo "2. Verify VPC subnets have internet access (NAT Gateway for private subnets)"
+            echo "3. Check security groups allow traffic"
+            echo "4. Verify instance type is available in your region"
+            echo "5. Check CloudWatch logs for node bootstrap errors"
+            
             exit 1
           fi
 
