@@ -139,22 +139,6 @@ jobs:
                     "value": "${{ secrets.MONGO_URI }}"
                   },
                   {
-                    "name": "MONGO_USER",
-                    "value": "${{ secrets.MONGO_USER }}"
-                  },
-                  {
-                    "name": "MONGO_PASS",
-                    "value": "${{ secrets.MONGO_PASS }}"
-                  },
-                  {
-                    "name": "MONGO_DB_NAME",
-                    "value": "${{ secrets.MONGO_DB_NAME }}"
-                  },
-                  {
-                    "name": "MONGO_CLUSTER_URL",
-                    "value": "${{ secrets.MONGO_CLUSTER_URL }}"
-                  },
-                  {
                     "name": "NODE_ENV",
                     "value": "production"
                   }
