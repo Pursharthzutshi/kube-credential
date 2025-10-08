@@ -1,17 +1,23 @@
 import { useState } from 'react';
+import type { AxiosError } from 'axios';
 import { issueCredential } from '../api.ts';
-import type { IssuanceResult } from '../types.ts';
+import type { IssuanceResult, ApiResponse } from '../types.ts';
+
+interface ErrorResult {
+  error: string;
+}
 
 export default function IssuePage() {
-  const [id, setId] = useState('');
-  const [holder, setHolder] = useState('');
-  const [subject, setSubject] = useState('{}');
-  const [result, setResult] = useState<IssuanceResult | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [id, setId] = useState<string>('');
+  const [holder, setHolder] = useState<string>('');
+  const [subject, setSubject] = useState<string>('{}');
+  const [result, setResult] = useState<IssuanceResult | ErrorResult | null>(null);
+  const [loading, setLoading] = useState<boolean>(false);
 
   const handleIssue = async () => {
     setLoading(true);
     setResult(null);
+
     try {
       const payload = {
         id,
@@ -20,10 +26,24 @@ export default function IssuePage() {
           ...JSON.parse(subject || '{}'),
         },
       };
-      const data = await issueCredential(payload);
-      setResult(data);
-    } catch (err: any) {
-      setResult({ error: err?.message || String(err) });
+
+      const res = (await issueCredential(payload)) as ApiResponse<IssuanceResult>;
+
+      if (res.ok && res.data) {
+        setResult(res.data);
+      } else if (res.error) {
+        setResult({ error: typeof res.error === 'string' ? res.error : JSON.stringify(res.error) });
+      } else {
+        setResult({ error: 'Unknown response from server' });
+      }
+    } catch (err: unknown) {
+      // Safe error narrowing
+      const axiosErr = err as AxiosError<{ error?: string }>;
+      const message =
+        axiosErr?.response?.data?.error ||
+        axiosErr?.message ||
+        (err instanceof Error ? err.message : String(err));
+      setResult({ error: message });
     } finally {
       setLoading(false);
     }
@@ -41,7 +61,7 @@ export default function IssuePage() {
           <input
             type="text"
             value={id}
-            onChange={(e) => setId(e.target.value)}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setId(e.target.value)}
             className="w-full border border-gray-300 rounded-lg p-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
             placeholder="cred-2025-06"
           />
@@ -52,7 +72,7 @@ export default function IssuePage() {
           <input
             type="text"
             value={holder}
-            onChange={(e) => setHolder(e.target.value)}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setHolder(e.target.value)}
             className="w-full border border-gray-300 rounded-lg p-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
             placeholder="John Doe"
           />
@@ -64,7 +84,7 @@ export default function IssuePage() {
           </label>
           <textarea
             value={subject}
-            onChange={(e) => setSubject(e.target.value)}
+            onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setSubject(e.target.value)}
             rows={5}
             className="w-full border border-gray-300 rounded-lg p-2 focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
             placeholder='{"email": "john@example.com", "department": "Design"}'
@@ -80,7 +100,7 @@ export default function IssuePage() {
               : 'bg-blue-600 hover:bg-blue-700'
           }`}
         >
-          {loading ? 'Issuing' : 'Issue'}
+          {loading ? 'Issuing...' : 'Issue'}
         </button>
 
         {result && (
