@@ -5,7 +5,7 @@ import VerifyPage from '../pages/VerifyPage';
 import * as api from '../../api';
 
 // Mock the API module
-jest.mock('../api');
+jest.mock('../../api');
 const mockedApi = api as jest.Mocked<typeof api>;
 
 describe('VerifyPage Component', () => {

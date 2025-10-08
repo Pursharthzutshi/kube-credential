@@ -1,22 +1,3 @@
-// import axios from 'axios';
-
-// // Detect environment variables depending on the build tool
-// const ISSUANCE_BASE =
-//   process.env.REACT_APP_ISSUANCE_URL || 'http://localhost:4001';
-// const VERIFY_BASE =
-//   process.env.REACT_APP_VERIFY_URL || 'http://localhost:4002';
-
-// export async function issueCredential(payload: any) {
-//   const { data } = await axios.post(`${ISSUANCE_BASE}/issue`, payload);
-//   return data;
-// }
-
-// export async function verifyCredential(payload: any) {
-//   const { data } = await axios.post(`${VERIFY_BASE}/verify`, payload);
-//   return data;
-// }
-
-
 import axios, { AxiosError } from 'axios';
 import type { 
   CredentialPayload, 
