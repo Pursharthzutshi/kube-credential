@@ -53,7 +53,7 @@ jobs:
         run: |
           cd backend/verification-service
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
           echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
@@ -61,42 +61,26 @@ jobs:
       - name: Setup infrastructure and get IDs
         id: get-infra
         run: |
-          # Check if cluster exists
           if ! aws ecs describe-clusters --clusters ${{ env.ECS_CLUSTER }} --region ${{ env.AWS_REGION }} --query 'clusters[0].status' --output text 2>/dev/null | grep -q ACTIVE; then
             echo "Setting up ECS infrastructure..."
-            
-            # Create VPC and networking
             VPC_ID=$(aws ec2 create-vpc --cidr-block 10.0.0.0/16 --region ${{ env.AWS_REGION }} --query 'Vpc.VpcId' --output text)
             aws ec2 create-tags --resources $VPC_ID --tags Key=Name,Value=zupple-vpc --region ${{ env.AWS_REGION }}
             aws ec2 modify-vpc-attribute --vpc-id $VPC_ID --enable-dns-hostnames --region ${{ env.AWS_REGION }}
             aws ec2 modify-vpc-attribute --vpc-id $VPC_ID --enable-dns-support --region ${{ env.AWS_REGION }}
-            
-            # Create Internet Gateway
             IGW_ID=$(aws ec2 create-internet-gateway --region ${{ env.AWS_REGION }} --query 'InternetGateway.InternetGatewayId' --output text)
             aws ec2 attach-internet-gateway --vpc-id $VPC_ID --internet-gateway-id $IGW_ID --region ${{ env.AWS_REGION }}
-            
-            # Create public subnets
             SUBNET1_ID=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.1.0/24 --availability-zone ${AWS_REGION}a --region ${{ env.AWS_REGION }} --query 'Subnet.SubnetId' --output text)
             SUBNET2_ID=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.2.0/24 --availability-zone ${AWS_REGION}b --region ${{ env.AWS_REGION }} --query 'Subnet.SubnetId' --output text)
-            
             aws ec2 modify-subnet-attribute --subnet-id $SUBNET1_ID --map-public-ip-on-launch --region ${{ env.AWS_REGION }}
             aws ec2 modify-subnet-attribute --subnet-id $SUBNET2_ID --map-public-ip-on-launch --region ${{ env.AWS_REGION }}
-            
-            # Create route table
             RT_ID=$(aws ec2 create-route-table --vpc-id $VPC_ID --region ${{ env.AWS_REGION }} --query 'RouteTable.RouteTableId' --output text)
             aws ec2 create-route --route-table-id $RT_ID --destination-cidr-block 0.0.0.0/0 --gateway-id $IGW_ID --region ${{ env.AWS_REGION }}
             aws ec2 associate-route-table --subnet-id $SUBNET1_ID --route-table-id $RT_ID --region ${{ env.AWS_REGION }}
             aws ec2 associate-route-table --subnet-id $SUBNET2_ID --route-table-id $RT_ID --region ${{ env.AWS_REGION }}
-            
-            # Create security group
             SG_ID=$(aws ec2 create-security-group --group-name zupple-ecs-sg --description "Security group for Zupple ECS services" --vpc-id $VPC_ID --region ${{ env.AWS_REGION }} --query 'GroupId' --output text)
             aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port 3000 --cidr 0.0.0.0/0 --region ${{ env.AWS_REGION }}
             aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port 80 --cidr 0.0.0.0/0 --region ${{ env.AWS_REGION }}
-            
-            # Create ECS cluster
             aws ecs create-cluster --cluster-name ${{ env.ECS_CLUSTER }} --region ${{ env.AWS_REGION }}
-            
-            # Create execution role
             aws iam create-role --role-name ecsTaskExecutionRole --assume-role-policy-document '{
               "Version": "2012-10-17",
               "Statement": [{
@@ -105,55 +89,30 @@ jobs:
                 "Action": "sts:AssumeRole"
               }]
             }' 2>/dev/null || true
-            
-            # Attach ECS execution policy
             aws iam attach-role-policy --role-name ecsTaskExecutionRole --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy 2>/dev/null || true
-            
-            # Create and attach CloudWatch Logs policy
             aws iam put-role-policy --role-name ecsTaskExecutionRole --policy-name CloudWatchLogsPolicy --policy-document '{
               "Version": "2012-10-17",
               "Statement": [{
                 "Effect": "Allow",
-                "Action": [
-                  "logs:CreateLogGroup",
-                  "logs:CreateLogStream",
-                  "logs:PutLogEvents",
-                  "logs:DescribeLogStreams"
-                ],
+                "Action": ["logs:CreateLogGroup","logs:CreateLogStream","logs:PutLogEvents","logs:DescribeLogStreams"],
                 "Resource": "arn:aws:logs:*:*:*"
               }]
             }' 2>/dev/null || true
-            
-            echo "✅ Infrastructure created"
+            echo " Infrastructure created"
             echo "vpc_id=$VPC_ID" >> $GITHUB_OUTPUT
             echo "subnet1_id=$SUBNET1_ID" >> $GITHUB_OUTPUT
             echo "subnet2_id=$SUBNET2_ID" >> $GITHUB_OUTPUT
             echo "sg_id=$SG_ID" >> $GITHUB_OUTPUT
-            
-            sleep 10
           else
-            # Infrastructure exists, query it by tags
             echo "Infrastructure already exists, retrieving IDs..."
             VPC_ID=$(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=zupple-vpc" --region ${{ env.AWS_REGION }} --query 'Vpcs[0].VpcId' --output text)
-            
-            if [ "$VPC_ID" = "None" ] || [ -z "$VPC_ID" ]; then
-              echo "❌ Error: VPC not found but cluster exists. This shouldn't happen."
-              exit 1
-            fi
-            
             SUBNET1_ID=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" "Name=availability-zone,Values=${AWS_REGION}a" --region ${{ env.AWS_REGION }} --query 'Subnets[0].SubnetId' --output text)
             SUBNET2_ID=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" "Name=availability-zone,Values=${AWS_REGION}b" --region ${{ env.AWS_REGION }} --query 'Subnets[0].SubnetId' --output text)
             SG_ID=$(aws ec2 describe-security-groups --filters "Name=group-name,Values=zupple-ecs-sg" "Name=vpc-id,Values=$VPC_ID" --region ${{ env.AWS_REGION }} --query 'SecurityGroups[0].GroupId' --output text)
-            
             echo "vpc_id=$VPC_ID" >> $GITHUB_OUTPUT
             echo "subnet1_id=$SUBNET1_ID" >> $GITHUB_OUTPUT
             echo "subnet2_id=$SUBNET2_ID" >> $GITHUB_OUTPUT
             echo "sg_id=$SG_ID" >> $GITHUB_OUTPUT
-            
-            echo "✅ Retrieved infrastructure IDs"
-            echo "VPC: $VPC_ID"
-            echo "Subnets: $SUBNET1_ID, $SUBNET2_ID"
-            echo "Security Group: $SG_ID"
           fi
 
       - name: Create/Update ECS Task Definition
@@ -173,10 +132,31 @@ jobs:
               {
                 "name": "${{ env.CONTAINER_NAME }}",
                 "image": "${{ steps.build-image.outputs.image }}",
-                "portMappings": [
+                "portMappings": [{ "containerPort": 3000, "protocol": "tcp" }],
+                "environment": [
                   {
-                    "containerPort": 3000,
-                    "protocol": "tcp"
+                    "name": "MONGO_URI",
+                    "value": "${{ secrets.MONGO_URI }}"
+                  },
+                  {
+                    "name": "MONGO_USER",
+                    "value": "${{ secrets.MONGO_USER }}"
+                  },
+                  {
+                    "name": "MONGO_PASS",
+                    "value": "${{ secrets.MONGO_PASS }}"
+                  },
+                  {
+                    "name": "MONGO_DB_NAME",
+                    "value": "${{ secrets.MONGO_DB_NAME }}"
+                  },
+                  {
+                    "name": "MONGO_CLUSTER_URL",
+                    "value": "${{ secrets.MONGO_CLUSTER_URL }}"
+                  },
+                  {
+                    "name": "NODE_ENV",
+                    "value": "production"
                   }
                 ],
                 "essential": true,
@@ -229,12 +209,9 @@ jobs:
       - name: Get service info
         run: |
           TASK_ARN=$(aws ecs list-tasks --cluster ${{ env.ECS_CLUSTER }} --service-name ${{ env.ECS_SERVICE }} --region ${{ env.AWS_REGION }} --query 'taskArns[0]' --output text)
-          
           if [ -n "$TASK_ARN" ]; then
-            ENI_ID=$(aws ecs describe-tasks --cluster ${{ env.ECS_CLUSTER }} --tasks $TASK_ARN --region ${{ env.AWS_REGION }} --query 'tasks[0].attachments[0].details[?name==`networkInterfaceId`].value' --output text)
+            ENI_ID=$(aws ecs describe-tasks --cluster ${{ env.ECS_CLUSTER }} --tasks $TASK_ARN --region ${{ env.AWS_REGION }} --query 'tasks[0].attachments[0].details[?name==\`networkInterfaceId\`].value' --output text)
             PUBLIC_IP=$(aws ec2 describe-network-interfaces --network-interface-ids $ENI_ID --region ${{ env.AWS_REGION }} --query 'NetworkInterfaces[0].Association.PublicIp' --output text)
-            
-            echo "🚀 Service deployed successfully!"
-            echo "📍 Public IP: $PUBLIC_IP"
-            echo "🌐 Access URL: http://$PUBLIC_IP:3000"
+            echo " Service deployed successfully!"
+            echo " Access URL: http://$PUBLIC_IP:3000"
           fi
