@@ -201,10 +201,15 @@ jobs:
 
       - name: Get service info
         run: |
-          TASK_ARN=$(aws ecs list-tasks --cluster ${{ matrix.ecs_cluster }} --service-name ${{ matrix.ecs_service }} --region ${{ env.AWS_REGION }} --query 'taskArns[0]' --output text)
+          TASK_ARN=$(aws ecs list-tasks --cluster ${{ matrix.ecs_cluster }} --service-name ${{ matrix.ecs_service }} --region ${{ env.AWS_REGION }} --query "taskArns[0]" --output text)
           if [ -n "$TASK_ARN" ]; then
-            ENI_ID=$(aws ecs describe-tasks --cluster ${{ matrix.ecs_cluster }} --tasks $TASK_ARN --region ${{ env.AWS_REGION }} --query 'tasks[0].attachments[0].details[?name==\`networkInterfaceId\`].value' --output text)
-            PUBLIC_IP=$(aws ec2 describe-network-interfaces --network-interface-ids $ENI_ID --region ${{ env.AWS_REGION }} --query 'NetworkInterfaces[0].Association.PublicIp' --output text)
+            ENI_ID=$(aws ecs describe-tasks \
+              --cluster ${{ matrix.ecs_cluster }} \
+              --tasks "$TASK_ARN" \
+              --region ${{ env.AWS_REGION }} \
+              --query "tasks[0].attachments[0].details[?name=='networkInterfaceId'].value" \
+              --output text)
+            PUBLIC_IP=$(aws ec2 describe-network-interfaces --network-interface-ids $ENI_ID --region ${{ env.AWS_REGION }} --query "NetworkInterfaces[0].Association.PublicIp" --output text)
             echo "Service ${{ matrix.ecs_service }} deployed successfully!"
             echo "Access URL: http://$PUBLIC_IP:${{ matrix.container_port }}"
           fi
