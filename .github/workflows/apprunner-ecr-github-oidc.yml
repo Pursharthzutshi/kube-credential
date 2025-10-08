@@ -1,3 +1,5 @@
+name: App Runner
+
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   Create ECR repo, GitHub OIDC provider + role for GitHub Actions, App Runner ECR access role,
