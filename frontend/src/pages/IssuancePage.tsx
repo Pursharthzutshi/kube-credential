@@ -1,4 +1,3 @@
-
 import { useState } from 'react';
 import { issueCredential } from '../../api.ts';
 
@@ -20,13 +19,9 @@ export default function IssuePage() {
           ...JSON.parse(subject || '{}'),
         },
       };
-      console.log('Frontend: calling issueCredential with', payload);
-
       const data = await issueCredential(payload);
-      console.log('Frontend: issueCredential returned', data);
       setResult(data);
     } catch (err: any) {
-      console.error('Frontend: unhandled error', err);
       setResult({ error: err?.message || String(err) });
     } finally {
       setLoading(false);
