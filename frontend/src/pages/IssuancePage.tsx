@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { issueCredential } from '../../api.ts';
+import { issueCredential } from '../../api';
 import type { IssuanceResult } from '../types';
 
 export default function IssuePage() {

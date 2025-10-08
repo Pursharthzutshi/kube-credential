@@ -12,7 +12,7 @@ export interface ErrorResponse {
   details?: unknown;
 }
 
-// Credential Types
+// Frontend API Types (matching what frontend actually sends)
 export interface CredentialPayload {
   id: string;
   subject: {
@@ -25,36 +25,31 @@ export interface VerificationPayload {
   id: string;
 }
 
-export interface CredentialData {
-  id: string;
-  subject: {
-    holder: string;
-    [key: string]: unknown;
-  };
+// Backend Response Types
+export interface IssuanceResponse {
+  message: string;
+  workerId: string;
   issuedAt?: string;
-  expiresAt?: string;
-  issuer?: string;
 }
 
-export interface VerificationResult {
-  valid: boolean;
-  verifiedBy?: string;
-  timestamp?: string;
-  credential?: CredentialData;
-  [key: string]: unknown;
+export interface VerificationResponse {
+  verified: boolean;
+  workerId?: string;
+  issuedAt?: string;
+  error?: string;
 }
 
 // Component State Types
 export interface IssuanceResult {
   ok?: boolean;
-  data?: CredentialData;
+  data?: IssuanceResponse;
   error?: string | ErrorResponse;
   status?: number;
 }
 
 export interface VerificationResultState {
   ok?: boolean;
-  data?: VerificationResult;
+  data?: VerificationResponse;
   error?: string | ErrorResponse;
   status?: number;
 }

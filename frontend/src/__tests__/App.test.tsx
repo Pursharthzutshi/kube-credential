@@ -19,8 +19,8 @@ describe('App Component', () => {
   it('should render the app with navigation', () => {
     render(<App />);
     
-    expect(screen.getByText('Issue')).toBeInTheDocument();
-    expect(screen.getByText('Verify')).toBeInTheDocument();
+    expect(screen.getByText('Issue Credential')).toBeInTheDocument();
+    expect(screen.getByText('Verify Credential')).toBeInTheDocument();
   });
 
   it('should show issuance page by default', () => {
@@ -33,7 +33,7 @@ describe('App Component', () => {
   it('should switch to verification page when Verify button is clicked', () => {
     render(<App />);
     
-    const verifyButton = screen.getByText('Verify');
+    const verifyButton = screen.getByText('Verify Credential');
     fireEvent.click(verifyButton);
     
     expect(screen.getByTestId('verification-page')).toBeInTheDocument();
@@ -44,13 +44,13 @@ describe('App Component', () => {
     render(<App />);
     
     // First switch to verification page
-    const verifyButton = screen.getByText('Verify');
+    const verifyButton = screen.getByText('Verify Credential');
     fireEvent.click(verifyButton);
     
     expect(screen.getByTestId('verification-page')).toBeInTheDocument();
     
     // Then switch back to issuance page
-    const issueButton = screen.getByText('Issue');
+    const issueButton = screen.getByText('Issue Credential');
     fireEvent.click(issueButton);
     
     expect(screen.getByTestId('issuance-page')).toBeInTheDocument();
@@ -60,17 +60,17 @@ describe('App Component', () => {
   it('should have proper button styling', () => {
     render(<App />);
     
-    const issueButton = screen.getByText('Issue');
-    const verifyButton = screen.getByText('Verify');
+    const issueButton = screen.getByText('Issue Credential');
+    const verifyButton = screen.getByText('Verify Credential');
     
-    expect(issueButton).toHaveStyle('padding: 12px');
-    expect(verifyButton).toHaveStyle('margin-left: 8px');
+    expect(issueButton).toHaveClass('px-6', 'py-3');
+    expect(verifyButton).toHaveClass('px-6', 'py-3');
   });
 
   it('should render navigation with proper styling', () => {
     render(<App />);
     
-    const nav = screen.getByText('Issue').closest('nav');
-    expect(nav).toHaveStyle('padding: 12px');
+    const nav = screen.getByText('Issue Credential').closest('nav');
+    expect(nav).toHaveClass('px-6', 'py-4');
   });
 });

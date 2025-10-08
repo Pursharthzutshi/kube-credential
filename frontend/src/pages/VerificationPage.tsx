@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { verifyCredential } from '../../api.ts';
+import { verifyCredential } from '../../api';
 
 export default function VerificationPage() {
   const [id, setId] = useState('');

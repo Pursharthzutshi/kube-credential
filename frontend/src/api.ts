@@ -7,9 +7,9 @@ import type {
   VerificationResponse,
 } from './types';
 
-// For Vite use import.meta.env, for CRA use process.env, for Next.js use process.env.NEXT_PUBLIC_...
-const ISSUANCE_BASE = import.meta.env.VITE_ISSUANCE_URL || 'http://localhost:4001';
-const VERIFY_BASE = import.meta.env.VITE_VERIFY_URL || 'http://localhost:4002';
+// Environment variables - works in both Vite and Node.js environments
+const ISSUANCE_BASE = process.env.VITE_ISSUANCE_URL || 'http://localhost:4001';
+const VERIFY_BASE = process.env.VITE_VERIFY_URL || 'http://localhost:4002';
 
 const axiosInstance = axios.create({
   timeout: 5000,

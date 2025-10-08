@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { verifyCredential } from '../../api.ts';
+import { verifyCredential } from '../../api';
 import type { VerificationResultState } from '../types';
 
 export default function VerifyPage() {
