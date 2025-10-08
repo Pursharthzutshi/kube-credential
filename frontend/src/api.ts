@@ -1,17 +1,53 @@
 import axios, { AxiosError } from 'axios';
-import type { 
-  CredentialPayload, 
-  VerificationPayload, 
-  IssuanceResult, 
+import type {
+  CredentialPayload,
+  VerificationPayload,
+  IssuanceResult,
   VerificationResult,
 } from './types';
 
-const ISSUANCE_BASE = import.meta.env.VITE_ISSUANCE_URL || 'https://localhost:4001';
-const VERIFY_BASE = import.meta.env.VITE_VERIFY_URL || 'https://localhost:4002';
+type BaseUrlOptions = {
+  envValue: string | undefined;
+  envKey: string;
+  localPort: number;
+  serviceName: string;
+};
+
+function resolveBaseUrl({ envValue, envKey, localPort, serviceName }: BaseUrlOptions) {
+  const trimmed = envValue?.trim();
+
+  if (trimmed) {
+    return trimmed.replace(/\/$/, '');
+  }
+
+  const fallback = `http://localhost:${localPort}`;
+
+  if (import.meta.env.PROD) {
+    console.warn(
+      `[config] Missing VITE_${envKey}; falling back to ${fallback}. Requests will fail unless the ${serviceName} service is running locally.`,
+    );
+  }
+
+  return fallback;
+}
+
+const ISSUANCE_BASE = resolveBaseUrl({
+  envValue: import.meta.env.VITE_ISSUANCE_URL,
+  envKey: 'ISSUANCE_URL',
+  localPort: 4001,
+  serviceName: 'issuance',
+});
+
+const VERIFY_BASE = resolveBaseUrl({
+  envValue: import.meta.env.VITE_VERIFY_URL,
+  envKey: 'VERIFY_URL',
+  localPort: 4002,
+  serviceName: 'verification',
+});
 
 const axiosInstance = axios.create({
   timeout: 5000,
-  headers: { 'Content-Type': 'application/json' }
+  headers: { 'Content-Type': 'application/json' },
 });
 
 export async function issueCredential(payload: CredentialPayload): Promise<IssuanceResult> {
