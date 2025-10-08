@@ -27,7 +27,7 @@ jobs:
             ecs_service: verification-service
             task_definition: verification-task
             container_name: verification-service
-            container_port: 3000
+            container_port: 4001
           - service: issuance
             ecr_repository: issuance-service
             directory: issuance-service
@@ -35,7 +35,7 @@ jobs:
             ecs_service: issuance-service
             task_definition: issuance-task
             container_name: issuance-service
-            container_port: 3000
+            container_port: 4002
 
     steps:
       - name: Checkout code
@@ -92,7 +92,8 @@ jobs:
             aws ec2 associate-route-table --subnet-id $SUBNET1_ID --route-table-id $RT_ID --region ${{ env.AWS_REGION }}
             aws ec2 associate-route-table --subnet-id $SUBNET2_ID --route-table-id $RT_ID --region ${{ env.AWS_REGION }}
             SG_ID=$(aws ec2 create-security-group --group-name zupple-ecs-sg --description "Security group for Zupple ECS services" --vpc-id $VPC_ID --region ${{ env.AWS_REGION }} --query 'GroupId' --output text)
-            aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port 3000 --cidr 0.0.0.0/0 --region ${{ env.AWS_REGION }}
+            aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port 4001 --cidr 0.0.0.0/0 --region ${{ env.AWS_REGION }}
+            aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port 4002 --cidr 0.0.0.0/0 --region ${{ env.AWS_REGION }}
             aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port 80 --cidr 0.0.0.0/0 --region ${{ env.AWS_REGION }}
             aws ecs create-cluster --cluster-name ${{ matrix.ecs_cluster }} --region ${{ env.AWS_REGION }}
             aws iam create-role --role-name ecsTaskExecutionRole --assume-role-policy-document '{
