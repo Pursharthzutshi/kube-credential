@@ -1,26 +1,74 @@
-apiVersion: eksctl.io/v1alpha5
-kind: ClusterConfig
+name: Create EKS Nodegroup
 
-metadata:
-  name: zupple-eks
-  region: us-east-1
+on:
+  workflow_dispatch:
+    inputs:
+      aws-region:
+        description: 'AWS region'
+        required: true
+        default: 'us-east-1'
+      cluster-name:
+        description: 'EKS cluster name'
+        required: true
+        default: 'zupple-eks'
+      node-instance-type:
+        description: 'Node instance type'
+        required: true
+        default: 't3.micro'
 
-managedNodeGroups:
-  - name: ng-1
-    instanceType: t3.micro    
-    desiredCapacity: 2
-    minSize: 1
-    maxSize: 3
-    volumeSize: 20
-    ssh:
-      allow: false
-    iam:
-      withAddonPolicies:
-        autoScaler: true
-        externalDNS: false
-        certManager: false
-        ebs: true
-    labels:
-      nodegroup: ng-1
-    tags:
-      Project: zupple
+jobs:
+  create-nodegroup:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ github.event.inputs.aws-region }}
+      CLUSTER_NAME: ${{ github.event.inputs.cluster-name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install eksctl and kubectl
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+          curl -sSLo kubectl https://s3.us-west-2.amazonaws.com/amazon-eks/1.29.0/2024-08-12/bin/linux/amd64/kubectl
+          chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+          ARCH=amd64
+          PLATFORM=$(uname -s)_$ARCH
+          curl -sLO "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$PLATFORM.tar.gz"
+          tar -xzf eksctl_$PLATFORM.tar.gz -C /tmp && rm eksctl_$PLATFORM.tar.gz
+          sudo mv /tmp/eksctl /usr/local/bin
+          eksctl version || true
+
+      - name: Prepare nodegroup file
+        run: |
+          NODE_TYPE="${{ github.event.inputs.node-instance-type }}"
+          cp infra/nodegroup.yaml /tmp/nodegroup.yaml
+          sed -i "s/instanceType: .*/instanceType: ${NODE_TYPE}/" /tmp/nodegroup.yaml || true
+          echo "/tmp/nodegroup.yaml:"
+          sed -n '1,200p' /tmp/nodegroup.yaml
+
+      - name: Create nodegroup
+        run: |
+          set -o pipefail
+          if eksctl get nodegroup --cluster "$CLUSTER_NAME" --region "$AWS_REGION" --name ng-1 >/dev/null 2>&1; then
+            echo "Nodegroup ng-1 already exists. Skipping."
+          else
+            eksctl create nodegroup -f /tmp/nodegroup.yaml --cluster "$CLUSTER_NAME" --region "$AWS_REGION" || {
+              CFN_STACK="eksctl-${CLUSTER_NAME}-nodegroup-ng-1"
+              echo "Nodegroup creation failed. CloudFormation events (if created):"
+              aws cloudformation describe-stack-events --stack-name "$CFN_STACK" --region "$AWS_REGION" --output table || true
+              aws autoscaling describe-auto-scaling-groups --query "AutoScalingGroups[?contains(AutoScalingGroupName, \`${CLUSTER_NAME}\`)]" --region "$AWS_REGION" --output table || true
+              aws ec2 describe-instances --filters "Name=tag:eks:cluster-name,Values=${CLUSTER_NAME}" --region "$AWS_REGION" --output table || true
+              exit 1
+            }
+          fi
