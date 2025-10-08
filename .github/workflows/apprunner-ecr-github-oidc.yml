@@ -215,8 +215,7 @@
 #             echo "Access URL: http://$PUBLIC_IP:${{ matrix.container_port }}"
 #           fi
 
-
-name: Deploy Services to ECS Fargate with ALB HTTPS
+name: Deploy Services to ECS Fargate
 
 on:
   push:
@@ -225,7 +224,7 @@ on:
     paths:
       - 'backend/verification-service/**'
       - 'backend/issuance-service/**'
-      - '.github/workflows/deploy-ecs.yml'
+      - '.github/workflows/deploy-verification-ecs.yml'
   workflow_dispatch:
 
 env:
@@ -233,7 +232,7 @@ env:
 
 jobs:
   deploy:
-    name: Deploy to ECS with HTTPS ALB
+    name: Deploy to ECS (per service)
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -273,7 +272,10 @@ jobs:
       - name: Create ECR repository if it doesn't exist
         run: |
           aws ecr describe-repositories --repository-names ${{ matrix.ecr_repository }} --region ${{ env.AWS_REGION }} || \
-          aws ecr create-repository --repository-name ${{ matrix.ecr_repository }} --region ${{ env.AWS_REGION }}
+          aws ecr create-repository \
+            --repository-name ${{ matrix.ecr_repository }} \
+            --region ${{ env.AWS_REGION }} \
+            --image-scanning-configuration scanOnPush=true
 
       - name: Build, tag, and push image to Amazon ECR
         id: build-image
@@ -288,68 +290,40 @@ jobs:
           docker push $ECR_REGISTRY/${{ matrix.ecr_repository }}:latest
           echo "image=$ECR_REGISTRY/${{ matrix.ecr_repository }}:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
-      - name: Setup VPC, Subnets, and Security Groups
+      - name: Setup infrastructure and get IDs
         id: get-infra
         run: |
-          set -e
-          REGION=${{ env.AWS_REGION }}
-          VPC_ID=$(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=zupple-vpc" --region $REGION --query 'Vpcs[0].VpcId' --output text)
-          if [ "$VPC_ID" = "None" ]; then
-            VPC_ID=$(aws ec2 create-vpc --cidr-block 10.0.0.0/16 --region $REGION --query 'Vpc.VpcId' --output text)
-            aws ec2 create-tags --resources $VPC_ID --tags Key=Name,Value=zupple-vpc --region $REGION
-            aws ec2 modify-vpc-attribute --vpc-id $VPC_ID --enable-dns-hostnames --region $REGION
-            aws ec2 modify-vpc-attribute --vpc-id $VPC_ID --enable-dns-support --region $REGION
+          if ! aws ecs describe-clusters --clusters ${{ matrix.ecs_cluster }} --region ${{ env.AWS_REGION }} --query 'clusters[0].status' --output text 2>/dev/null | grep -q ACTIVE; then
+            VPC_ID=$(aws ec2 create-vpc --cidr-block 10.0.0.0/16 --region ${{ env.AWS_REGION }} --query 'Vpc.VpcId' --output text)
+            aws ec2 create-tags --resources $VPC_ID --tags Key=Name,Value=zupple-vpc --region ${{ env.AWS_REGION }}
+            aws ec2 modify-vpc-attribute --vpc-id $VPC_ID --enable-dns-hostnames --region ${{ env.AWS_REGION }}
+            aws ec2 modify-vpc-attribute --vpc-id $VPC_ID --enable-dns-support --region ${{ env.AWS_REGION }}
+            IGW_ID=$(aws ec2 create-internet-gateway --region ${{ env.AWS_REGION }} --query 'InternetGateway.InternetGatewayId' --output text)
+            aws ec2 attach-internet-gateway --vpc-id $VPC_ID --internet-gateway-id $IGW_ID --region ${{ env.AWS_REGION }}
+            SUBNET1_ID=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.1.0/24 --availability-zone ${AWS_REGION}a --region ${{ env.AWS_REGION }} --query 'Subnet.SubnetId' --output text)
+            SUBNET2_ID=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.2.0/24 --availability-zone ${AWS_REGION}b --region ${{ env.AWS_REGION }} --query 'Subnet.SubnetId' --output text)
+            aws ec2 modify-subnet-attribute --subnet-id $SUBNET1_ID --map-public-ip-on-launch --region ${{ env.AWS_REGION }}
+            aws ec2 modify-subnet-attribute --subnet-id $SUBNET2_ID --map-public-ip-on-launch --region ${{ env.AWS_REGION }}
+            RT_ID=$(aws ec2 create-route-table --vpc-id $VPC_ID --region ${{ env.AWS_REGION }} --query 'RouteTable.RouteTableId' --output text)
+            aws ec2 create-route --route-table-id $RT_ID --destination-cidr-block 0.0.0.0/0 --gateway-id $IGW_ID --region ${{ env.AWS_REGION }}
+            aws ec2 associate-route-table --subnet-id $SUBNET1_ID --route-table-id $RT_ID --region ${{ env.AWS_REGION }}
+            aws ec2 associate-route-table --subnet-id $SUBNET2_ID --route-table-id $RT_ID --region ${{ env.AWS_REGION }}
+            SG_ID=$(aws ec2 create-security-group --group-name zupple-ecs-sg --description "Security group for Zupple ECS services" --vpc-id $VPC_ID --region ${{ env.AWS_REGION }} --query 'GroupId' --output text)
+            aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port 4001 --cidr 0.0.0.0/0 --region ${{ env.AWS_REGION }}
+            aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port 4002 --cidr 0.0.0.0/0 --region ${{ env.AWS_REGION }}
+            aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port 443 --cidr 0.0.0.0/0 --region ${{ env.AWS_REGION }}
+            aws ecs create-cluster --cluster-name ${{ matrix.ecs_cluster }} --region ${{ env.AWS_REGION }}
+            echo "vpc_id=$VPC_ID" >> $GITHUB_OUTPUT
+            echo "subnet1_id=$SUBNET1_ID" >> $GITHUB_OUTPUT
+            echo "subnet2_id=$SUBNET2_ID" >> $GITHUB_OUTPUT
+            echo "sg_id=$SG_ID" >> $GITHUB_OUTPUT
           fi
-          AZA=${REGION}a
-          AZB=${REGION}b
-          SUBNET1=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.1.0/24 --availability-zone $AZA --region $REGION --query 'Subnet.SubnetId' --output text 2>/dev/null || true)
-          SUBNET2=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.2.0/24 --availability-zone $AZB --region $REGION --query 'Subnet.SubnetId' --output text 2>/dev/null || true)
-          aws ec2 modify-subnet-attribute --subnet-id $SUBNET1 --map-public-ip-on-launch --region $REGION
-          aws ec2 modify-subnet-attribute --subnet-id $SUBNET2 --map-public-ip-on-launch --region $REGION
-          IGW=$(aws ec2 create-internet-gateway --region $REGION --query 'InternetGateway.InternetGatewayId' --output text)
-          aws ec2 attach-internet-gateway --vpc-id $VPC_ID --internet-gateway-id $IGW --region $REGION
-          RT=$(aws ec2 create-route-table --vpc-id $VPC_ID --region $REGION --query 'RouteTable.RouteTableId' --output text)
-          aws ec2 create-route --route-table-id $RT --destination-cidr-block 0.0.0.0/0 --gateway-id $IGW --region $REGION
-          aws ec2 associate-route-table --route-table-id $RT --subnet-id $SUBNET1 --region $REGION
-          aws ec2 associate-route-table --route-table-id $RT --subnet-id $SUBNET2 --region $REGION
-          SG_ID=$(aws ec2 create-security-group --group-name zupple-ecs-sg --description "ECS SG" --vpc-id $VPC_ID --region $REGION --query 'GroupId' --output text 2>/dev/null || true)
-          aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port 4001 --cidr 0.0.0.0/0 --region $REGION || true
-          aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port 4002 --cidr 0.0.0.0/0 --region $REGION || true
-          echo "vpc_id=$VPC_ID" >> $GITHUB_OUTPUT
-          echo "subnet1=$SUBNET1" >> $GITHUB_OUTPUT
-          echo "subnet2=$SUBNET2" >> $GITHUB_OUTPUT
-          echo "sg_id=$SG_ID" >> $GITHUB_OUTPUT
 
-      - name: Create ALB and HTTPS Listener
-        id: alb
-        run: |
-          set -e
-          REGION=${{ env.AWS_REGION }}
-          VPC=${{ steps.get-infra.outputs.vpc_id }}
-          SUB1=${{ steps.get-infra.outputs.subnet1 }}
-          SUB2=${{ steps.get-infra.outputs.subnet2 }}
-          ECS_SG=${{ steps.get-infra.outputs.sg_id }}
-          ALB_SG=$(aws ec2 create-security-group --group-name zupple-alb-sg --description "ALB SG" --vpc-id $VPC --region $REGION --query 'GroupId' --output text 2>/dev/null || true)
-          aws ec2 authorize-security-group-ingress --group-id $ALB_SG --protocol tcp --port 80 --cidr 0.0.0.0/0 --region $REGION || true
-          aws ec2 authorize-security-group-ingress --group-id $ALB_SG --protocol tcp --port 443 --cidr 0.0.0.0/0 --region $REGION || true
-          aws ec2 authorize-security-group-ingress --group-id $ECS_SG --protocol tcp --port 4001 --source-group $ALB_SG --region $REGION || true
-          aws ec2 authorize-security-group-ingress --group-id $ECS_SG --protocol tcp --port 4002 --source-group $ALB_SG --region $REGION || true
-          ALB_ARN=$(aws elbv2 create-load-balancer --name zupple-alb --subnets $SUB1 $SUB2 --security-groups $ALB_SG --scheme internet-facing --region $REGION --query 'LoadBalancers[0].LoadBalancerArn' --output text)
-          TG_ISS=$(aws elbv2 create-target-group --name issuance-tg --protocol HTTP --port 4002 --vpc-id $VPC --target-type ip --health-check-path /health --region $REGION --query 'TargetGroups[0].TargetGroupArn' --output text)
-          TG_VER=$(aws elbv2 create-target-group --name verification-tg --protocol HTTP --port 4001 --vpc-id $VPC --target-type ip --health-check-path /health --region $REGION --query 'TargetGroups[0].TargetGroupArn' --output text)
-          CERT=${{ secrets.ACM_CERT_ARN }}
-          LISTENER=$(aws elbv2 create-listener --load-balancer-arn $ALB_ARN --protocol HTTPS --port 443 --certificates CertificateArn=$CERT --default-actions Type=forward,TargetGroupArn=$TG_ISS --region $REGION --query 'Listeners[0].ListenerArn' --output text)
-          aws elbv2 create-rule --listener-arn $LISTENER --priority 10 --conditions Field=path-pattern,Values='/verify*' --actions Type=forward,TargetGroupArn=$TG_VER --region $REGION
-          ALB_DNS=$(aws elbv2 describe-load-balancers --load-balancer-arns $ALB_ARN --region $REGION --query 'LoadBalancers[0].DNSName' --output text)
-          echo "alb_dns=$ALB_DNS" >> $GITHUB_OUTPUT
-          echo "tg_issuance=$TG_ISS" >> $GITHUB_OUTPUT
-          echo "tg_verification=$TG_VER" >> $GITHUB_OUTPUT
-
-      - name: Register Task Definition
-        id: task
+      - name: Create/Update ECS Task Definition
+        id: task-def
         run: |
           AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          cat > task.json <<EOF
+          cat > task-definition.json <<EOF
           {
             "family": "${{ matrix.task_definition }}",
             "networkMode": "awsvpc",
@@ -362,30 +336,55 @@ jobs:
                 "name": "${{ matrix.container_name }}",
                 "image": "${{ steps.build-image.outputs.image }}",
                 "portMappings": [{ "containerPort": ${{ matrix.container_port }}, "protocol": "tcp" }],
+                "environment": [
+                  { "name": "MONGO_URI", "value": "${{ secrets.MONGO_URI }}" },
+                  { "name": "NODE_ENV", "value": "production" }
+                ],
                 "essential": true
               }
             ]
           }
           EOF
-          aws ecs register-task-definition --cli-input-json file://task.json --region ${{ env.AWS_REGION }}
+          aws ecs register-task-definition --cli-input-json file://task-definition.json --region ${{ env.AWS_REGION }}
 
-      - name: Create or Update ECS Service with ALB
+      - name: Create or Update ECS Service
         run: |
-          CLUSTER=${{ matrix.ecs_cluster }}
-          SERVICE=${{ matrix.ecs_service }}
-          TG_ISS=${{ steps.alb.outputs.tg_issuance }}
-          TG_VER=${{ steps.alb.outputs.tg_verification }}
-          if [ "${{ matrix.service }}" = "issuance" ]; then
-            TG=$TG_ISS
+          if aws ecs describe-services --cluster ${{ matrix.ecs_cluster }} --services ${{ matrix.ecs_service }} --region ${{ env.AWS_REGION }} --query 'services[0].status' --output text | grep -q ACTIVE; then
+            aws ecs update-service \
+              --cluster ${{ matrix.ecs_cluster }} \
+              --service ${{ matrix.ecs_service }} \
+              --task-definition ${{ matrix.task_definition }} \
+              --force-new-deployment \
+              --region ${{ env.AWS_REGION }}
           else
-            TG=$TG_VER
-          fi
-          if aws ecs describe-services --cluster $CLUSTER --services $SERVICE --region ${{ env.AWS_REGION }} --query 'services[0].status' --output text | grep -q ACTIVE; then
-            aws ecs update-service --cluster $CLUSTER --service $SERVICE --task-definition ${{ matrix.task_definition }} --force-new-deployment --region ${{ env.AWS_REGION }}
-          else
-            aws ecs create-service --cluster $CLUSTER --service-name $SERVICE --task-definition ${{ matrix.task_definition }} --desired-count 1 --launch-type FARGATE --load-balancers "targetGroupArn=$TG,containerName=${{ matrix.container_name }},containerPort=${{ matrix.container_port }}" --network-configuration "awsvpcConfiguration={subnets=[${{ steps.get-infra.outputs.subnet1 }},${{ steps.get-infra.outputs.subnet2 }}],securityGroups=[${{ steps.get-infra.outputs.sg_id }}],assignPublicIp=ENABLED}" --region ${{ env.AWS_REGION }}
+            aws ecs create-service \
+              --cluster ${{ matrix.ecs_cluster }} \
+              --service-name ${{ matrix.ecs_service }} \
+              --task-definition ${{ matrix.task_definition }} \
+              --desired-count 1 \
+              --launch-type FARGATE \
+              --network-configuration "awsvpcConfiguration={subnets=[${{ steps.get-infra.outputs.subnet1_id }},${{ steps.get-infra.outputs.subnet2_id }}],securityGroups=[${{ steps.get-infra.outputs.sg_id }}],assignPublicIp=ENABLED}" \
+              --region ${{ env.AWS_REGION }}
           fi
 
-      - name: Output ALB DNS
+      - name: Wait for service stability
         run: |
-          echo "https://${{ steps.alb.outputs.alb_dns }}"
+          aws ecs wait services-stable \
+            --cluster ${{ matrix.ecs_cluster }} \
+            --services ${{ matrix.ecs_service }} \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Get service info
+        run: |
+          TASK_ARN=$(aws ecs list-tasks --cluster ${{ matrix.ecs_cluster }} --service-name ${{ matrix.ecs_service }} --region ${{ env.AWS_REGION }} --query "taskArns[0]" --output text)
+          if [ -n "$TASK_ARN" ]; then
+            ENI_ID=$(aws ecs describe-tasks \
+              --cluster ${{ matrix.ecs_cluster }} \
+              --tasks "$TASK_ARN" \
+              --region ${{ env.AWS_REGION }} \
+              --query "tasks[0].attachments[0].details[?name=='networkInterfaceId'].value" \
+              --output text)
+            PUBLIC_IP=$(aws ec2 describe-network-interfaces --network-interface-ids $ENI_ID --region ${{ env.AWS_REGION }} --query "NetworkInterfaces[0].Association.PublicIp" --output text)
+            echo "Service ${{ matrix.ecs_service }} deployed successfully!"
+            echo "Access URL: https://$PUBLIC_IP:${{ matrix.container_port }}"
+          fi
