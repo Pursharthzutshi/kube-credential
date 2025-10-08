@@ -42,14 +42,40 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -y
-          sudo apt-get install -y curl tar
+          sudo apt-get install -y curl tar jq
+
+      - name: Clean up failed CloudFormation stack if present
+        run: |
+          set -euo pipefail
+          STACK_NAME="eksctl-${{ github.event.inputs.cluster-name }}-cluster"
+          REGION="${{ github.event.inputs.aws-region }}"
+          echo "Checking for CloudFormation stack: $STACK_NAME in region $REGION"
+          if aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" >/dev/null 2>&1; then
+            STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" --query "Stacks[0].StackStatus" --output text)
+            echo "Found stack $STACK_NAME with status: $STATUS"
+            if [[ "$STATUS" == "ROLLBACK_COMPLETE" || "$STATUS" == "CREATE_FAILED" || "$STATUS" == "ROLLBACK_IN_PROGRESS" || "$STATUS" == "DELETE_FAILED" ]]; then
+              echo "Deleting failed/rolled-back stack $STACK_NAME..."
+              aws cloudformation delete-stack --stack-name "$STACK_NAME" --region "$REGION"
+              echo "Waiting for deletion to complete..."
+              aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME" --region "$REGION"
+              echo "Deleted stack $STACK_NAME."
+            elif [[ "$STATUS" == "CREATE_COMPLETE" || "$STATUS" == "UPDATE_COMPLETE" ]]; then
+              echo "Stack $STACK_NAME appears healthy (status: $STATUS)."
+              echo "Assuming the cluster may already exist. Exiting so you can run deploy.yml instead."
+              exit 0
+            else
+              echo "Stack $STACK_NAME exists with status $STATUS — not deleting automatically. Inspect in CloudFormation console."
+              exit 1
+            fi
+          else
+            echo "No existing CloudFormation stack named $STACK_NAME found. Proceeding to create cluster."
+          fi
 
       - name: Install eksctl (official latest)
         run: |
           set -euo pipefail
           ARCH=amd64
           PLATFORM=$(uname -s)_$ARCH
-          # Download a recent eksctl release binary (use GitHub releases)
           curl -sLo /tmp/eksctl.tar.gz "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_${PLATFORM}.tar.gz"
           tar -xzf /tmp/eksctl.tar.gz -C /tmp
           sudo mv /tmp/eksctl /usr/local/bin/eksctl
@@ -62,8 +88,10 @@ jobs:
         run: |
           set -euo pipefail
           echo "Creating cluster ${CLUSTER_NAME} in ${AWS_REGION} (this may take ~10-30 minutes)..."
-          echo "eksctl create cluster --name \"${CLUSTER_NAME}\" --region \"${AWS_REGION}\" --node-type \"${{ github.event.inputs.node-instance-type }}\" --nodes \"${NODES}\" --managed --version 1.29"
-          # Note: omit --wait/--timeout for widest compatibility; eksctl will still wait for creation to finish.
+          if eksctl get cluster --region "${AWS_REGION}" --name "${CLUSTER_NAME}" >/dev/null 2>&1; then
+            echo "Cluster ${CLUSTER_NAME} already exists according to eksctl. Exiting."
+            exit 0
+          fi
           eksctl create cluster \
             --name "${CLUSTER_NAME}" \
             --region "${AWS_REGION}" \
