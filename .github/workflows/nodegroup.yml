@@ -49,13 +49,21 @@ jobs:
           sudo mv /tmp/eksctl /usr/local/bin
           eksctl version || true
 
+      - name: Debug - show repo tree
+        run: |
+          echo "Current directory: $(pwd)"
+          echo "Contents of repo root:"
+          ls -la
+          echo "Contents of infra/:"
+          ls -la infra || true
+
       - name: Prepare nodegroup file
         run: |
           NODE_TYPE="${{ github.event.inputs.node-instance-type }}"
-          cp .github/workflows/nodegroup.yaml /tmp/nodegroup.yaml
-          sed -i "s/instanceType: .*/instanceType: ${NODE_TYPE}/" /tmp/nodegroup.yaml || true
-          echo "/tmp/nodegroup.yaml:"
-          sed -n '1,200p' /tmp/nodegroup.yaml
+          cp infra/nodegroup.yaml /tmp/nodegroup.yaml
+          sed -E -i "s/instanceType:[[:space:]]*.*/instanceType: ${NODE_TYPE}/" /tmp/nodegroup.yaml
+          echo "Prepared /tmp/nodegroup.yaml"
+          cat /tmp/nodegroup.yaml
 
       - name: Create nodegroup
         run: |
@@ -65,7 +73,7 @@ jobs:
           else
             eksctl create nodegroup -f /tmp/nodegroup.yaml --cluster "$CLUSTER_NAME" --region "$AWS_REGION" || {
               CFN_STACK="eksctl-${CLUSTER_NAME}-nodegroup-ng-1"
-              echo "Nodegroup creation failed. CloudFormation events (if created):"
+              echo "Nodegroup creation failed. Checking CloudFormation events..."
               aws cloudformation describe-stack-events --stack-name "$CFN_STACK" --region "$AWS_REGION" --output table || true
               aws autoscaling describe-auto-scaling-groups --query "AutoScalingGroups[?contains(AutoScalingGroupName, \`${CLUSTER_NAME}\`)]" --region "$AWS_REGION" --output table || true
               aws ec2 describe-instances --filters "Name=tag:eks:cluster-name,Values=${CLUSTER_NAME}" --region "$AWS_REGION" --output table || true
