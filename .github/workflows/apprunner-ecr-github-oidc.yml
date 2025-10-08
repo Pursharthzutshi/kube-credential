@@ -1,0 +1,165 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Create ECR repo, GitHub OIDC provider + role for GitHub Actions, App Runner ECR access role,
+  and an App Runner service that deploys an image from ECR.
+
+Parameters:
+  RepoName:
+    Type: String
+    Description: ECR repository name (e.g. my-app)
+    Default: my-app
+  ImageTag:
+    Type: String
+    Description: Image tag to deploy to App Runner
+    Default: latest
+  GitHubRepo:
+    Type: String
+    Description: GitHub repository in form "owner/repo" used to scope the OIDC trust (e.g. my-org/my-repo)
+  GitHubBranch:
+    Type: String
+    Description: GitHub branch name (used to restrict token:ref if desired)
+    Default: refs/heads/main
+  AppRunnerServiceName:
+    Type: String
+    Description: App Runner service name
+    Default: my-apprunner-service
+
+Resources:
+
+  ECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref RepoName
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 20 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 20
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+
+  AppRunnerECRAccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-AppRunnerECRAccessRole"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apprunner.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSAppRunnerServicePolicyForECRAccess
+
+  GitHubOIDCProvider:
+    Type: AWS::IAM::OpenIDConnectProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+        - 1c58a3a8518e8759bf075b76b750d4f2df264fcd
+      ClientIdList:
+        - sts.amazonaws.com
+
+  GitHubActionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-GitHubActionsRole"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref GitHubOIDCProvider
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringLike:
+                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubRepo}:*"
+              StringEquals:
+                token.actions.githubusercontent.com:aud: "sts.amazonaws.com"
+      Policies:
+        - PolicyName: GitHubActionsECRAndAppRunnerPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:PutImage
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:DescribeRepositories
+                  - ecr:GetDownloadUrlForLayer
+                Resource: !Sub "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${RepoName}"
+              - Effect: Allow
+                Action:
+                  - ecr:CreateRepository
+                Resource: "*"
+              # Allow GitHub Actions to update the App Runner service
+              - Effect: Allow
+                Action:
+                  - apprunner:UpdateService
+                  - apprunner:CreateService
+                  - apprunner:DescribeService
+                  - apprunner:ListServices
+                  - apprunner:StartDeployment
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource: !GetAtt AppRunnerECRAccessRole.Arn
+
+  AppRunnerService:
+    Type: AWS::AppRunner::Service
+    Properties:
+      ServiceName: !Ref AppRunnerServiceName
+      SourceConfiguration:
+        AutoDeploymentsEnabled: true
+        AuthenticationConfiguration:
+          AccessRoleArn: !GetAtt AppRunnerECRAccessRole.Arn
+        ImageRepository:
+          ImageIdentifier: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${RepoName}:${ImageTag}"
+          ImageRepositoryType: ECR
+          ImageConfiguration:
+            Port: "8080"             
+      InstanceConfiguration:
+        Cpu: "1024"               
+        Memory: "2048"             
+      HealthCheckConfiguration:
+        Protocol: TCP
+        Path: "/"
+        Interval: 10
+        Timeout: 5
+        HealthyThreshold: 2
+        UnhealthyThreshold: 5
+      Tags:
+        - Key: createdBy
+          Value: CloudFormation
+
+Outputs:
+  ECRRepositoryUri:
+    Description: ECR repository URI (push your images here)
+    Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${RepoName}"
+  GitHubActionsRoleArn:
+    Description: IAM Role ARN that GitHub Actions can assume via OIDC
+    Value: !GetAtt GitHubActionsRole.Arn
+  AppRunnerServiceArn:
+    Description: ARN of the App Runner service
+    Value: !Ref AppRunnerService
+  AppRunnerServiceUrl:
+    Description: App Runner public URL (service endpoint) -- use this to hit your container.
+    Value: !GetAtt AppRunnerService.ServiceUrl
