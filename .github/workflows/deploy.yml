@@ -1030,8 +1030,6 @@
 
 
 
-
-
 name: Deploy to EKS
 
 on:
@@ -1244,83 +1242,31 @@ jobs:
           aws eks update-kubeconfig --name $CLUSTER_NAME --region $AWS_REGION
           echo "Kubeconfig updated successfully!"
 
-      - name: Wait for nodes to be Ready with detailed diagnostics
+      - name: Wait for nodes to be Ready
         run: |
           echo "Waiting for Kubernetes nodes to be Ready..."
           
-          for i in {1..45}; do
+          for i in {1..60}; do
             READY_NODES=$(kubectl get nodes --no-headers 2>/dev/null | grep -c ' Ready ' || echo "0")
             TOTAL_NODES=$(kubectl get nodes --no-headers 2>/dev/null | wc -l || echo "0")
-            NOTREADY_NODES=$(kubectl get nodes --no-headers 2>/dev/null | grep -c ' NotReady ' || echo "0")
             
-            echo "[$i/45] Ready: $READY_NODES | NotReady: $NOTREADY_NODES | Total: $TOTAL_NODES ($(($i * 20 / 60)) min)"
+            echo "[$i/60] Ready nodes: $READY_NODES/$TOTAL_NODES"
             
             if [ "$READY_NODES" -ge 1 ]; then
-              echo ""
               echo "✓ $READY_NODES node(s) are ready!"
+              echo ""
               kubectl get nodes -o wide
               break
             fi
             
-            # Show what's happening every 5 attempts (~2 minutes)
+            # Show detailed status every 5 attempts
             if [ $((i % 5)) -eq 0 ]; then
-              echo ""
-              echo "  === Status Check ==="
+              echo "  Current node status:"
+              kubectl get nodes 2>/dev/null || echo "  No nodes registered yet"
               
-              if [ "$TOTAL_NODES" -eq 0 ]; then
-                echo "    NO NODES REGISTERED WITH CLUSTER YET"
-                echo "  This means EC2 instances haven't joined the cluster."
-                echo ""
-                echo "  Checking Auto Scaling Group for EC2 instances..."
-                
-                ASG_NAME=$(aws eks describe-nodegroup \
-                  --cluster-name $CLUSTER_NAME \
-                  --nodegroup-name ng-1 \
-                  --region $AWS_REGION \
-                  --query 'nodegroup.resources.autoScalingGroups[0].name' \
-                  --output text 2>/dev/null)
-                
-                if [ -n "$ASG_NAME" ] && [ "$ASG_NAME" != "None" ]; then
-                  INSTANCE_COUNT=$(aws autoscaling describe-auto-scaling-groups \
-                    --auto-scaling-group-names $ASG_NAME \
-                    --region $AWS_REGION \
-                    --query 'AutoScalingGroups[0].Instances | length(@)' \
-                    --output text 2>/dev/null || echo "0")
-                  
-                  echo "  EC2 instances in ASG: $INSTANCE_COUNT"
-                  
-                  if [ "$INSTANCE_COUNT" -eq 0 ]; then
-                    echo "   NO EC2 INSTANCES LAUNCHED"
-                    echo "  Possible causes:"
-                    echo "    - Instance type unavailable in the region"
-                    echo "    - Service quota limits"
-                    echo "    - Insufficient capacity"
-                  else
-                    echo "  EC2 instances exist but haven't joined cluster yet"
-                    echo "  Possible causes:"
-                    echo "    - IAM role permissions missing"
-                    echo "    - VPC/Security group blocking access"
-                    echo "    - User data script failing"
-                    
-                    # Show instance details
-                    aws autoscaling describe-auto-scaling-groups \
-                      --auto-scaling-group-names $ASG_NAME \
-                      --region $AWS_REGION \
-                      --query 'AutoScalingGroups[0].Instances[*].{InstanceId:InstanceId,HealthStatus:HealthStatus,LifecycleState:LifecycleState}' \
-                      --output table 2>/dev/null || true
-                  fi
-                fi
-              else
-                echo "  Nodes registered but not ready yet:"
-                kubectl get nodes 2>/dev/null || true
-                
-                echo ""
-                echo "  Checking system pods:"
-                kubectl get pods -n kube-system --field-selector=status.phase!=Running 2>/dev/null | head -10 || true
-              fi
-              
-              echo "  ===================="
-              echo ""
+              # Check for pods that might be having issues
+              echo "  System pod status:"
+              kubectl get pods -n kube-system --field-selector=status.phase!=Running 2>/dev/null | head -10 || true
             fi
             
             sleep 20
@@ -1329,57 +1275,17 @@ jobs:
           READY_NODES=$(kubectl get nodes --no-headers 2>/dev/null | grep -c ' Ready ' || echo "0")
           if [ "$READY_NODES" -lt 1 ]; then
             echo ""
-            echo "======================================"
-            echo "ERROR: No nodes became Ready after 15 minutes"
-            echo "======================================"
+            echo "ERROR: No nodes became Ready after 20 minutes"
             echo ""
-            
-            # Final comprehensive diagnostics
-            echo "=== FINAL DIAGNOSTICS ==="
+            echo "=== Final Diagnostics ==="
+            echo "Nodes:"
+            kubectl get nodes -o wide 2>/dev/null || echo "Cannot get nodes"
             echo ""
-            echo "1. Kubernetes Nodes:"
-            kubectl get nodes -o wide 2>/dev/null || echo "   No nodes visible to kubectl"
-            
+            echo "Node details:"
+            kubectl describe nodes 2>/dev/null || echo "Cannot describe nodes"
             echo ""
-            echo "2. Nodegroup Status:"
-            aws eks describe-nodegroup \
-              --cluster-name $CLUSTER_NAME \
-              --nodegroup-name ng-1 \
-              --region $AWS_REGION \
-              --query '{Status:nodegroup.status,Health:nodegroup.health,IAMRole:nodegroup.nodeRole}' \
-              --output json 2>/dev/null || echo "   Cannot describe nodegroup"
-            
-            echo ""
-            echo "3. Auto Scaling Group:"
-            ASG_NAME=$(aws eks describe-nodegroup \
-              --cluster-name $CLUSTER_NAME \
-              --nodegroup-name ng-1 \
-              --region $AWS_REGION \
-              --query 'nodegroup.resources.autoScalingGroups[0].name' \
-              --output text 2>/dev/null)
-            
-            if [ -n "$ASG_NAME" ] && [ "$ASG_NAME" != "None" ]; then
-              aws autoscaling describe-auto-scaling-groups \
-                --auto-scaling-group-names $ASG_NAME \
-                --region $AWS_REGION \
-                --query 'AutoScalingGroups[0]' \
-                --output json 2>/dev/null || echo "   Cannot describe ASG"
-            fi
-            
-            echo ""
-            echo "4. System Pods:"
-            kubectl get pods -n kube-system -o wide 2>/dev/null || echo "   Cannot get pods"
-            
-            echo ""
-            echo "==========================="
-            echo ""
-            echo "TROUBLESHOOTING STEPS:"
-            echo "1. Check IAM role has required policies (AmazonEKSWorkerNodePolicy, etc.)"
-            echo "2. Verify VPC subnets have internet access (NAT Gateway for private subnets)"
-            echo "3. Check security groups allow traffic"
-            echo "4. Verify instance type is available in your region"
-            echo "5. Check CloudWatch logs for node bootstrap errors"
-            
+            echo "System pods:"
+            kubectl get pods -n kube-system -o wide 2>/dev/null || echo "Cannot get pods"
             exit 1
           fi
 
