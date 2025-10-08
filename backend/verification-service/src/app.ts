@@ -3,7 +3,6 @@ import bodyParser from 'body-parser';
 import cors from 'cors';
 import routes from './routes';
 
-
 export function createApp() {
 const app = express();
 app.use(cors());

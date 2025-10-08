@@ -1,7 +1,7 @@
 import '@testing-library/jest-dom';
 
-process.env.VITE_ISSUANCE_URL = 'http://localhost:4001';
-process.env.VITE_VERIFY_URL = 'http://localhost:4002';
+process.env.VITE_ISSUANCE_URL = 'https://localhost:4001';
+process.env.VITE_VERIFY_URL = 'https://localhost:4002';
 
 const originalConsoleError = console.error;
 const originalConsoleLog = console.log;

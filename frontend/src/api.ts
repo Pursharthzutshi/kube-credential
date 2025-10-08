@@ -6,9 +6,8 @@ import type {
   VerificationResult,
 } from './types';
 
-// Environment variables - works in both Vite and Node.js environments
-const ISSUANCE_BASE = import.meta.env.VITE_ISSUANCE_URL || 'http://localhost:4001';
-const VERIFY_BASE = import.meta.env.VITE_VERIFY_URL || 'http://localhost:4002';
+const ISSUANCE_BASE = import.meta.env.VITE_ISSUANCE_URL || 'https://localhost:4001';
+const VERIFY_BASE = import.meta.env.VITE_VERIFY_URL || 'https://localhost:4002';
 
 const axiosInstance = axios.create({
   timeout: 5000,
