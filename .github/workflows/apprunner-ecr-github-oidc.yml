@@ -1,4 +1,4 @@
-name: Deploy Verification Service to AWS App Runner
+name: Deploy Verification Service to ECS Fargate
 
 on:
   push:
@@ -6,17 +6,20 @@ on:
       - main
     paths:
       - 'backend/verification-service/**'
-      - '.github/workflows/deploy-verification-service.yml'
+      - '.github/workflows/deploy-verification-ecs.yml'
   workflow_dispatch:
 
 env:
   AWS_REGION: us-east-1
   ECR_REPOSITORY: verification-service
-  APP_RUNNER_SERVICE: verification-service
+  ECS_CLUSTER: zupple-cluster
+  ECS_SERVICE: verification-service
+  ECS_TASK_DEFINITION: verification-task
+  CONTAINER_NAME: verification-service
 
 jobs:
   deploy:
-    name: Deploy to App Runner
+    name: Deploy to ECS
     runs-on: ubuntu-latest
     
     steps:
@@ -55,105 +58,98 @@ jobs:
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
           echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
-      - name: Check if App Runner service exists
-        id: check-service
+      - name: Get infrastructure IDs
+        id: get-infra
         run: |
-          if aws apprunner list-services --region ${{ env.AWS_REGION }} --query "ServiceSummaryList[?ServiceName=='${{ env.APP_RUNNER_SERVICE }}'].ServiceArn" --output text | grep -q arn; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-            SERVICE_ARN=$(aws apprunner list-services --region ${{ env.AWS_REGION }} --query "ServiceSummaryList[?ServiceName=='${{ env.APP_RUNNER_SERVICE }}'].ServiceArn" --output text)
-            echo "service_arn=$SERVICE_ARN" >> $GITHUB_OUTPUT
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-          fi
+          VPC_ID=$(aws ssm get-parameter --name /zupple/vpc-id --region ${{ env.AWS_REGION }} --query 'Parameter.Value' --output text)
+          SUBNET1_ID=$(aws ssm get-parameter --name /zupple/subnet1-id --region ${{ env.AWS_REGION }} --query 'Parameter.Value' --output text)
+          SUBNET2_ID=$(aws ssm get-parameter --name /zupple/subnet2-id --region ${{ env.AWS_REGION }} --query 'Parameter.Value' --output text)
+          SG_ID=$(aws ssm get-parameter --name /zupple/security-group-id --region ${{ env.AWS_REGION }} --query 'Parameter.Value' --output text)
+          
+          echo "vpc_id=$VPC_ID" >> $GITHUB_OUTPUT
+          echo "subnet1_id=$SUBNET1_ID" >> $GITHUB_OUTPUT
+          echo "subnet2_id=$SUBNET2_ID" >> $GITHUB_OUTPUT
+          echo "sg_id=$SG_ID" >> $GITHUB_OUTPUT
 
-      - name: Create App Runner service (first time)
-        if: steps.check-service.outputs.exists == 'false'
-        id: create-service
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+      - name: Create/Update ECS Task Definition
+        id: task-def
         run: |
-          # Get AWS Account ID
           AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
           
-          # Create IAM role if it doesn't exist
-          aws iam get-role --role-name AppRunnerECRAccessRole 2>/dev/null || \
-          aws iam create-role \
-            --role-name AppRunnerECRAccessRole \
-            --assume-role-policy-document '{
-              "Version": "2012-10-17",
-              "Statement": [{
-                "Effect": "Allow",
-                "Principal": {"Service": "build.apprunner.amazonaws.com"},
-                "Action": "sts:AssumeRole"
-              }]
-            }'
-          
-          # Attach policy
-          aws iam attach-role-policy \
-            --role-name AppRunnerECRAccessRole \
-            --policy-arn arn:aws:iam::aws:policy/service-role/AWSAppRunnerServicePolicyForECRAccess 2>/dev/null || true
-          
-          # Wait for role to propagate
-          sleep 10
-          
-          # Create service
-          SERVICE_ARN=$(aws apprunner create-service \
-            --service-name ${{ env.APP_RUNNER_SERVICE }} \
-            --source-configuration "{
-              \"ImageRepository\": {
-                \"ImageIdentifier\": \"${{ steps.build-image.outputs.image }}\",
-                \"ImageRepositoryType\": \"ECR\",
-                \"ImageConfiguration\": {
-                  \"Port\": \"3000\"
+          cat > task-definition.json <<EOF
+          {
+            "family": "${{ env.ECS_TASK_DEFINITION }}",
+            "networkMode": "awsvpc",
+            "requiresCompatibilities": ["FARGATE"],
+            "cpu": "256",
+            "memory": "512",
+            "executionRoleArn": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/ecsTaskExecutionRole",
+            "containerDefinitions": [
+              {
+                "name": "${{ env.CONTAINER_NAME }}",
+                "image": "${{ steps.build-image.outputs.image }}",
+                "portMappings": [
+                  {
+                    "containerPort": 3000,
+                    "protocol": "tcp"
+                  }
+                ],
+                "essential": true,
+                "logConfiguration": {
+                  "logDriver": "awslogs",
+                  "options": {
+                    "awslogs-group": "/ecs/${{ env.ECS_TASK_DEFINITION }}",
+                    "awslogs-region": "${{ env.AWS_REGION }}",
+                    "awslogs-stream-prefix": "ecs",
+                    "awslogs-create-group": "true"
+                  }
                 }
-              },
-              \"AuthenticationConfiguration\": {
-                \"AccessRoleArn\": \"arn:aws:iam::${AWS_ACCOUNT_ID}:role/AppRunnerECRAccessRole\"
-              },
-              \"AutoDeploymentsEnabled\": false
-            }" \
-            --instance-configuration '{
-              "Cpu": "1 vCPU",
-              "Memory": "2 GB"
-            }' \
-            --region ${{ env.AWS_REGION }} \
-            --query 'Service.ServiceArn' \
-            --output text)
+              }
+            ]
+          }
+          EOF
           
-          echo "service_arn=$SERVICE_ARN" >> $GITHUB_OUTPUT
-          echo "Created new App Runner service: $SERVICE_ARN"
+          aws ecs register-task-definition --cli-input-json file://task-definition.json --region ${{ env.AWS_REGION }}
 
-      - name: Update App Runner service (subsequent deployments)
-        if: steps.check-service.outputs.exists == 'true'
-        id: update-service
+      - name: Create or Update ECS Service
         run: |
-          aws apprunner update-service \
-            --service-arn ${{ steps.check-service.outputs.service_arn }} \
-            --source-configuration "ImageRepository={ImageIdentifier=${{ steps.build-image.outputs.image }},ImageRepositoryType=ECR,ImageConfiguration={Port=3000}}" \
+          if aws ecs describe-services --cluster ${{ env.ECS_CLUSTER }} --services ${{ env.ECS_SERVICE }} --region ${{ env.AWS_REGION }} --query 'services[0].status' --output text | grep -q ACTIVE; then
+            echo "Updating existing service..."
+            aws ecs update-service \
+              --cluster ${{ env.ECS_CLUSTER }} \
+              --service ${{ env.ECS_SERVICE }} \
+              --task-definition ${{ env.ECS_TASK_DEFINITION }} \
+              --force-new-deployment \
+              --region ${{ env.AWS_REGION }}
+          else
+            echo "Creating new service..."
+            aws ecs create-service \
+              --cluster ${{ env.ECS_CLUSTER }} \
+              --service-name ${{ env.ECS_SERVICE }} \
+              --task-definition ${{ env.ECS_TASK_DEFINITION }} \
+              --desired-count 1 \
+              --launch-type FARGATE \
+              --network-configuration "awsvpcConfiguration={subnets=[${{ steps.get-infra.outputs.subnet1_id }},${{ steps.get-infra.outputs.subnet2_id }}],securityGroups=[${{ steps.get-infra.outputs.sg_id }}],assignPublicIp=ENABLED}" \
+              --region ${{ env.AWS_REGION }}
+          fi
+
+      - name: Wait for service stability
+        run: |
+          echo "Waiting for service to stabilize..."
+          aws ecs wait services-stable \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }} \
             --region ${{ env.AWS_REGION }}
-          
-          echo " Updated existing App Runner service"
 
-      - name: Wait for deployment
+      - name: Get service info
         run: |
-          SERVICE_ARN="${{ steps.create-service.outputs.service_arn || steps.check-service.outputs.service_arn }}"
+          TASK_ARN=$(aws ecs list-tasks --cluster ${{ env.ECS_CLUSTER }} --service-name ${{ env.ECS_SERVICE }} --region ${{ env.AWS_REGION }} --query 'taskArns[0]' --output text)
           
-          echo "Waiting for service to be ready..."
-          aws apprunner wait service-running \
-            --service-arn $SERVICE_ARN \
-            --region ${{ env.AWS_REGION }} || true
-
-      - name: Get service URL
-        run: |
-          SERVICE_ARN="${{ steps.create-service.outputs.service_arn || steps.check-service.outputs.service_arn }}"
-          
-          SERVICE_URL=$(aws apprunner describe-service \
-            --service-arn $SERVICE_ARN \
-            --query 'Service.ServiceUrl' \
-            --output text \
-            --region ${{ env.AWS_REGION }})
-          
-          echo " Service URL: https://$SERVICE_URL"
-          echo " Service ARN: $SERVICE_ARN"
-          echo ""
-          echo " Save this ARN as a GitHub secret 'VERIFICATION_SERVICE_ARN' for faster subsequent deployments"
+          if [ -n "$TASK_ARN" ]; then
+            ENI_ID=$(aws ecs describe-tasks --cluster ${{ env.ECS_CLUSTER }} --tasks $TASK_ARN --region ${{ env.AWS_REGION }} --query 'tasks[0].attachments[0].details[?name==`networkInterfaceId`].value' --output text)
+            PUBLIC_IP=$(aws ec2 describe-network-interfaces --network-interface-ids $ENI_ID --region ${{ env.AWS_REGION }} --query 'NetworkInterfaces[0].Association.PublicIp' --output text)
+            
+            echo " Service deployed successfully!"
+            echo " Public IP: $PUBLIC_IP"
+            echo " Access URL: http://$PUBLIC_IP:3000"
+          fi
