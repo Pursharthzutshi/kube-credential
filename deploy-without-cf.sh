@@ -38,7 +38,7 @@ else
     echo "EKS cluster $CLUSTER_NAME does not exist. Please create it manually or request CloudFormation permissions."
     echo ""
     echo "To create the EKS cluster manually, run:"
-    echo "eksctl create cluster --name $CLUSTER_NAME --region $AWS_REGION --node-type $NODE_INSTANCE_TYPE --nodes 2"
+    echo "eksctl create cluster --name $CLUSTER_NAME --region $AWS_REGION --node-type $NODE_INSTANCE_TYPE --nodes 2 managed"
     echo ""
     echo "Or use the AWS Console to create the cluster with the following specifications:"
     echo "  - Name: $CLUSTER_NAME"

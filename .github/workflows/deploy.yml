@@ -138,7 +138,7 @@ jobs:
             echo "Please create the EKS cluster manually or request CloudFormation permissions."
             echo ""
             echo "To create manually:"
-            echo "eksctl create cluster --name $CLUSTER_NAME --region $AWS_REGION --node-type ${{ github.event.inputs.node-instance-type }} --nodes 2"
+            echo "eksctl create cluster --name $CLUSTER_NAME --region $AWS_REGION --node-type ${{ github.event.inputs.node-instance-type }} --nodes 2 managed"
             exit 1
           fi
 
