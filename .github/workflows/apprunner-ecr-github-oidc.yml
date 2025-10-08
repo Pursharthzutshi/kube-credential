@@ -55,25 +55,105 @@ jobs:
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
           echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
-      - name: Deploy to App Runner
-        id: deploy-apprunner
+      - name: Check if App Runner service exists
+        id: check-service
+        run: |
+          if aws apprunner list-services --region ${{ env.AWS_REGION }} --query "ServiceSummaryList[?ServiceName=='${{ env.APP_RUNNER_SERVICE }}'].ServiceArn" --output text | grep -q arn; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            SERVICE_ARN=$(aws apprunner list-services --region ${{ env.AWS_REGION }} --query "ServiceSummaryList[?ServiceName=='${{ env.APP_RUNNER_SERVICE }}'].ServiceArn" --output text)
+            echo "service_arn=$SERVICE_ARN" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create App Runner service (first time)
+        if: steps.check-service.outputs.exists == 'false'
+        id: create-service
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          # Get AWS Account ID
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          
+          # Create IAM role if it doesn't exist
+          aws iam get-role --role-name AppRunnerECRAccessRole 2>/dev/null || \
+          aws iam create-role \
+            --role-name AppRunnerECRAccessRole \
+            --assume-role-policy-document '{
+              "Version": "2012-10-17",
+              "Statement": [{
+                "Effect": "Allow",
+                "Principal": {"Service": "build.apprunner.amazonaws.com"},
+                "Action": "sts:AssumeRole"
+              }]
+            }'
+          
+          # Attach policy
+          aws iam attach-role-policy \
+            --role-name AppRunnerECRAccessRole \
+            --policy-arn arn:aws:iam::aws:policy/service-role/AWSAppRunnerServicePolicyForECRAccess 2>/dev/null || true
+          
+          # Wait for role to propagate
+          sleep 10
+          
+          # Create service
+          SERVICE_ARN=$(aws apprunner create-service \
+            --service-name ${{ env.APP_RUNNER_SERVICE }} \
+            --source-configuration "{
+              \"ImageRepository\": {
+                \"ImageIdentifier\": \"${{ steps.build-image.outputs.image }}\",
+                \"ImageRepositoryType\": \"ECR\",
+                \"ImageConfiguration\": {
+                  \"Port\": \"3000\"
+                }
+              },
+              \"AuthenticationConfiguration\": {
+                \"AccessRoleArn\": \"arn:aws:iam::${AWS_ACCOUNT_ID}:role/AppRunnerECRAccessRole\"
+              },
+              \"AutoDeploymentsEnabled\": false
+            }" \
+            --instance-configuration '{
+              "Cpu": "1 vCPU",
+              "Memory": "2 GB"
+            }' \
+            --region ${{ env.AWS_REGION }} \
+            --query 'Service.ServiceArn' \
+            --output text)
+          
+          echo "service_arn=$SERVICE_ARN" >> $GITHUB_OUTPUT
+          echo "Created new App Runner service: $SERVICE_ARN"
+
+      - name: Update App Runner service (subsequent deployments)
+        if: steps.check-service.outputs.exists == 'true'
+        id: update-service
         run: |
           aws apprunner update-service \
-            --service-arn ${{ secrets.VERIFICATION_SERVICE_ARN }} \
+            --service-arn ${{ steps.check-service.outputs.service_arn }} \
             --source-configuration "ImageRepository={ImageIdentifier=${{ steps.build-image.outputs.image }},ImageRepositoryType=ECR,ImageConfiguration={Port=3000}}" \
             --region ${{ env.AWS_REGION }}
+          
+          echo " Updated existing App Runner service"
 
       - name: Wait for deployment
         run: |
-          aws apprunner wait service-updated \
-            --service-arn ${{ secrets.VERIFICATION_SERVICE_ARN }} \
-            --region ${{ env.AWS_REGION }}
+          SERVICE_ARN="${{ steps.create-service.outputs.service_arn || steps.check-service.outputs.service_arn }}"
+          
+          echo "Waiting for service to be ready..."
+          aws apprunner wait service-running \
+            --service-arn $SERVICE_ARN \
+            --region ${{ env.AWS_REGION }} || true
 
       - name: Get service URL
         run: |
+          SERVICE_ARN="${{ steps.create-service.outputs.service_arn || steps.check-service.outputs.service_arn }}"
+          
           SERVICE_URL=$(aws apprunner describe-service \
-            --service-arn ${{ secrets.VERIFICATION_SERVICE_ARN }} \
+            --service-arn $SERVICE_ARN \
             --query 'Service.ServiceUrl' \
             --output text \
             --region ${{ env.AWS_REGION }})
-          echo "Service URL: https://$SERVICE_URL"
+          
+          echo " Service URL: https://$SERVICE_URL"
+          echo " Service ARN: $SERVICE_ARN"
+          echo ""
+          echo " Save this ARN as a GitHub secret 'VERIFICATION_SERVICE_ARN' for faster subsequent deployments"
