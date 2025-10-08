@@ -5,7 +5,7 @@ const port = process.env.PORT ? Number(process.env.PORT) : 4001;
 (async () => {
 await connectDB();
 const app = createApp();
-app.listen(port, () => {
+app.listen(port, "0.0.0.0", () => {
 console.log(`Issuance service running on ${port} — worker=${process.env.WORKER_ID || 'dev'}`);
 });
 })();
