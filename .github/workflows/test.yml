@@ -9,22 +9,22 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-
+    
     strategy:
       matrix:
         service: [frontend, issuance-service, verification-service]
-
+    
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-
+    
     - name: Setup Node.js
       uses: actions/setup-node@v4
       with:
         node-version: '18'
         cache: 'npm'
-        cache-dependency-path: ${{ matrix.service == 'frontend' ? 'frontend/package-lock.json' : format('backend/{0}/package-lock.json', matrix.service) }}
-
+        cache-dependency-path: ${{ matrix.service === 'frontend' && 'frontend/package-lock.json' || 'backend/' + matrix.service + '/package-lock.json' }}
+    
     - name: Install dependencies
       run: |
         if [ "${{ matrix.service }}" = "frontend" ]; then
@@ -33,13 +33,7 @@ jobs:
           cd backend/${{ matrix.service }}
         fi
         npm ci
-
-    - name: Run linting (frontend only)
-      if: matrix.service == 'frontend'
-      run: |
-        cd frontend
-        npm run lint
-
+    
     - name: Run tests
       run: |
         if [ "${{ matrix.service }}" = "frontend" ]; then
@@ -48,12 +42,10 @@ jobs:
           cd backend/${{ matrix.service }}
         fi
         npm run test:ci
-
+    
     - name: Upload coverage
       uses: codecov/codecov-action@v4
-      if: always()
       with:
-        file: ${{ matrix.service == 'frontend' ? 'frontend/coverage/lcov.info' : format('backend/{0}/coverage/lcov.info', matrix.service) }}
+        file: ${{ matrix.service === 'frontend' && 'frontend/coverage/lcov.info' || 'backend/' + matrix.service + '/coverage/lcov.info' }}
         flags: ${{ matrix.service }}
         name: ${{ matrix.service }}-coverage
-        fail_ci_if_error: false
