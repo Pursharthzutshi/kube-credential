@@ -14,8 +14,9 @@ export default function VerificationPage() {
     try {
       const res = await verifyCredential({ id });
       setMsg(JSON.stringify(res, null, 2));
-    } catch (err: any) {
-      setMsg(err?.response?.data?.error || err.message);
+    } catch (err) {
+      const error = err as Error & { response?: { data?: { error?: string } } };
+      setMsg(error?.response?.data?.error || error.message);
     } finally {
       setLoading(false);
     }

@@ -134,12 +134,12 @@ describe('VerifyPage Component', () => {
   });
 
   it('should show loading state during API call', async () => {
-    let resolvePromise: (value: any) => void;
+    let resolvePromise: (value: unknown) => void;
     const promise = new Promise((resolve) => {
       resolvePromise = resolve;
     });
     
-    mockedApi.verifyCredential.mockReturnValue(promise as any);
+    mockedApi.verifyCredential.mockReturnValue(promise as ReturnType<typeof api.verifyCredential>);
 
     render(<VerifyPage />);
     

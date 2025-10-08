@@ -19,5 +19,24 @@ export default defineConfig([
       ecmaVersion: 2020,
       globals: globals.browser,
     },
+    rules: {
+      // Allow explicit any in test files and setup files
+      '@typescript-eslint/no-explicit-any': ['error', {
+        ignoreRestArgs: true
+      }],
+      '@typescript-eslint/no-unused-vars': ['error', {
+        argsIgnorePattern: '^_',
+        varsIgnorePattern: '^_'
+      }],
+      // Allow console in test files
+      'no-console': 'off'
+    }
   },
+  {
+    files: ['**/*.test.{ts,tsx}', '**/setupTests.ts', '**/__tests__/**/*'],
+    rules: {
+      '@typescript-eslint/no-explicit-any': 'off',
+      'no-console': 'off'
+    }
+  }
 ])

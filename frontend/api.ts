@@ -17,7 +17,14 @@
 // }
 
 
-import axios from 'axios';
+import axios, { AxiosError } from 'axios';
+import type { 
+  CredentialPayload, 
+  VerificationPayload, 
+  ApiResponse, 
+  CredentialData, 
+  VerificationResult,
+} from './types';
 
 // For Vite use import.meta.env, for CRA use process.env, for Next.js use process.env.NEXT_PUBLIC_...
 const ISSUANCE_BASE = import.meta.env.VITE_ISSUANCE_URL || 'http://localhost:4001';
@@ -28,31 +35,33 @@ const axiosInstance = axios.create({
   headers: { 'Content-Type': 'application/json' }
 });
 
-export async function issueCredential(payload: any) {
+export async function issueCredential(payload: CredentialPayload): Promise<ApiResponse<CredentialData>> {
   try {
     const { data } = await axiosInstance.post(`${ISSUANCE_BASE}/issue`, payload);
     return { ok: true, data };
-  } catch (err: any) {
+  } catch (err) {
+    const axiosError = err as AxiosError;
     // Normalize error for frontend
-    console.error('issueCredential error', err?.response?.status, err?.message, err?.response?.data);
+    console.error('issueCredential error', axiosError?.response?.status, axiosError?.message, axiosError?.response?.data);
     return {
       ok: false,
-      status: err?.response?.status || null,
-      error: err?.response?.data || err?.message || 'unknown error'
+      status: axiosError?.response?.status || null,
+      error: axiosError?.response?.data || axiosError?.message || 'unknown error'
     };
   }
 }
 
-export async function verifyCredential(payload: any) {
+export async function verifyCredential(payload: VerificationPayload): Promise<ApiResponse<VerificationResult>> {
   try {
     const { data } = await axiosInstance.post(`${VERIFY_BASE}/verify`, payload);
     return { ok: true, data };
-  } catch (err: any) {
-    console.error('verifyCredential error', err?.response?.status, err?.message, err?.response?.data);
+  } catch (err) {
+    const axiosError = err as AxiosError;
+    console.error('verifyCredential error', axiosError?.response?.status, axiosError?.message, axiosError?.response?.data);
     return {
       ok: false,
-      status: err?.response?.status || null,
-      error: err?.response?.data || err?.message || 'unknown error'
+      status: axiosError?.response?.status || null,
+      error: axiosError?.response?.data || axiosError?.message || 'unknown error'
     };
   }
 }

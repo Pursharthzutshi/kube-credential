@@ -11,7 +11,7 @@ const mockAxiosInstance = {
   headers: { 'Content-Type': 'application/json' },
 };
 
-mockedAxios.create.mockReturnValue(mockAxiosInstance as any);
+mockedAxios.create.mockReturnValue(mockAxiosInstance as unknown as ReturnType<typeof axios.create>);
 
 describe('API Functions', () => {
   beforeEach(() => {

@@ -1,10 +1,11 @@
 import { useState } from 'react';
 import { verifyCredential } from '../../api.ts';
+import type { VerificationResultState } from '../types';
 
 export default function VerifyPage() {
   const [id, setId] = useState('');
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<VerificationResultState | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const handleVerify = async () => {
@@ -15,10 +16,11 @@ export default function VerifyPage() {
     try {
       const res = await verifyCredential({ id });
       if (res && res.ok) setResult(res.data);
-      else if (res && res.error) setError(res.error);
+      else if (res && res.error) setError(typeof res.error === 'string' ? res.error : JSON.stringify(res.error));
       else setResult(res);
-    } catch (e: any) {
-      setError(e?.message || String(e));
+    } catch (e) {
+      const error = e as Error;
+      setError(error?.message || String(e));
     } finally {
       setLoading(false);
     }

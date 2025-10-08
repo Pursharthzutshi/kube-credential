@@ -7,7 +7,7 @@ const originalConsoleError = console.error;
 const originalConsoleLog = console.log;
 
 beforeAll(() => {
-  console.error = (...args: any[]) => {
+  console.error = (...args: unknown[]) => {
     if (
       typeof args[0] === 'string' &&
       (args[0].includes('Warning:') || args[0].includes('Error:'))
@@ -17,7 +17,7 @@ beforeAll(() => {
     originalConsoleError.call(console, ...args);
   };
   
-  console.log = (...args: any[]) => {
+  console.log = () => {
     // Suppress console.log in tests unless specifically needed
   };
 });

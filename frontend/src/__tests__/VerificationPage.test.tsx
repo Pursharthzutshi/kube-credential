@@ -134,12 +134,12 @@ describe('VerificationPage Component', () => {
   });
 
   it('should show loading state during API call', async () => {
-    let resolvePromise: (value: any) => void;
+    let resolvePromise: (value: unknown) => void;
     const promise = new Promise((resolve) => {
       resolvePromise = resolve;
     });
     
-    mockedApi.verifyCredential.mockReturnValue(promise as any);
+    mockedApi.verifyCredential.mockReturnValue(promise as ReturnType<typeof api.verifyCredential>);
 
     render(<VerificationPage />);
     
@@ -171,7 +171,6 @@ describe('VerificationPage Component', () => {
     render(<VerificationPage />);
     
     const idInput = screen.getByLabelText(/Credential ID:/);
-    const form = screen.getByRole('button', { name: /Verify/ }).closest('form');
     
     await user.type(idInput, 'test-credential-123');
     await user.click(screen.getByRole('button', { name: /Verify/ }));
