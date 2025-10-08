@@ -1,167 +1,71 @@
-name: App Runner
+name: Deploy Issuance Service to AWS App Runner
 
-AWSTemplateFormatVersion: '2010-09-09'
-Description: >
-  Create ECR repo, GitHub OIDC provider + role for GitHub Actions, App Runner ECR access role,
-  and an App Runner service that deploys an image from ECR.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'backend/issuance-service/**'
+      - '.github/workflows/deploy-issuance-service.yml'
+  workflow_dispatch:
 
-Parameters:
-  RepoName:
-    Type: String
-    Description: ECR repository name (e.g. my-app)
-    Default: my-app
-  ImageTag:
-    Type: String
-    Description: Image tag to deploy to App Runner
-    Default: latest
-  GitHubRepo:
-    Type: String
-    Description: GitHub repository in form "owner/repo" used to scope the OIDC trust (e.g. my-org/my-repo)
-  GitHubBranch:
-    Type: String
-    Description: GitHub branch name (used to restrict token:ref if desired)
-    Default: refs/heads/main
-  AppRunnerServiceName:
-    Type: String
-    Description: App Runner service name
-    Default: my-apprunner-service
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: issuance-service
+  APP_RUNNER_SERVICE: issuance-service
 
-Resources:
+jobs:
+  deploy:
+    name: Deploy to App Runner
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-  ECRRepository:
-    Type: AWS::ECR::Repository
-    Properties:
-      RepositoryName: !Ref RepoName
-      LifecyclePolicy:
-        LifecyclePolicyText: |
-          {
-            "rules": [
-              {
-                "rulePriority": 1,
-                "description": "Keep last 20 images",
-                "selection": {
-                  "tagStatus": "any",
-                  "countType": "imageCountMoreThan",
-                  "countNumber": 20
-                },
-                "action": {
-                  "type": "expire"
-                }
-              }
-            ]
-          }
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
-  AppRunnerECRAccessRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub "${AWS::StackName}-AppRunnerECRAccessRole"
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: apprunner.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/AWSAppRunnerServicePolicyForECRAccess
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
-  GitHubOIDCProvider:
-    Type: AWS::IAM::OpenIDConnectProvider
-    Properties:
-      Url: https://token.actions.githubusercontent.com
-      ThumbprintList:
-        - 6938fd4d98bab03faadb97b34396831e3780aea1
-        - 1c58a3a8518e8759bf075b76b750d4f2df264fcd
-      ClientIdList:
-        - sts.amazonaws.com
+      - name: Build, tag, and push image to Amazon ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          cd backend/issuance-service
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
-  GitHubActionsRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub "${AWS::StackName}-GitHubActionsRole"
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Federated: !Ref GitHubOIDCProvider
-            Action: sts:AssumeRoleWithWebIdentity
-            Condition:
-              StringLike:
-                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubRepo}:*"
-              StringEquals:
-                token.actions.githubusercontent.com:aud: "sts.amazonaws.com"
-      Policies:
-        - PolicyName: GitHubActionsECRAndAppRunnerPolicy
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                  - ecr:GetAuthorizationToken
-                  - ecr:InitiateLayerUpload
-                  - ecr:UploadLayerPart
-                  - ecr:CompleteLayerUpload
-                  - ecr:PutImage
-                  - ecr:BatchCheckLayerAvailability
-                  - ecr:DescribeRepositories
-                  - ecr:GetDownloadUrlForLayer
-                Resource: !Sub "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${RepoName}"
-              - Effect: Allow
-                Action:
-                  - ecr:CreateRepository
-                Resource: "*"
-              # Allow GitHub Actions to update the App Runner service
-              - Effect: Allow
-                Action:
-                  - apprunner:UpdateService
-                  - apprunner:CreateService
-                  - apprunner:DescribeService
-                  - apprunner:ListServices
-                  - apprunner:StartDeployment
-                Resource: "*"
-              - Effect: Allow
-                Action:
-                  - iam:PassRole
-                Resource: !GetAtt AppRunnerECRAccessRole.Arn
+      - name: Deploy to App Runner
+        id: deploy-apprunner
+        run: |
+          aws apprunner update-service \
+            --service-arn ${{ secrets.ISSUANCE_SERVICE_ARN }} \
+            --source-configuration "ImageRepository={ImageIdentifier=${{ steps.build-image.outputs.image }},ImageRepositoryType=ECR,ImageConfiguration={Port=3000}}" \
+            --region ${{ env.AWS_REGION }}
 
-  AppRunnerService:
-    Type: AWS::AppRunner::Service
-    Properties:
-      ServiceName: !Ref AppRunnerServiceName
-      SourceConfiguration:
-        AutoDeploymentsEnabled: true
-        AuthenticationConfiguration:
-          AccessRoleArn: !GetAtt AppRunnerECRAccessRole.Arn
-        ImageRepository:
-          ImageIdentifier: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${RepoName}:${ImageTag}"
-          ImageRepositoryType: ECR
-          ImageConfiguration:
-            Port: "8080"             
-      InstanceConfiguration:
-        Cpu: "1024"               
-        Memory: "2048"             
-      HealthCheckConfiguration:
-        Protocol: TCP
-        Path: "/"
-        Interval: 10
-        Timeout: 5
-        HealthyThreshold: 2
-        UnhealthyThreshold: 5
-      Tags:
-        - Key: createdBy
-          Value: CloudFormation
+      - name: Wait for deployment
+        run: |
+          aws apprunner wait service-updated \
+            --service-arn ${{ secrets.ISSUANCE_SERVICE_ARN }} \
+            --region ${{ env.AWS_REGION }}
 
-Outputs:
-  ECRRepositoryUri:
-    Description: ECR repository URI (push your images here)
-    Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${RepoName}"
-  GitHubActionsRoleArn:
-    Description: IAM Role ARN that GitHub Actions can assume via OIDC
-    Value: !GetAtt GitHubActionsRole.Arn
-  AppRunnerServiceArn:
-    Description: ARN of the App Runner service
-    Value: !Ref AppRunnerService
-  AppRunnerServiceUrl:
-    Description: App Runner public URL (service endpoint) -- use this to hit your container.
-    Value: !GetAtt AppRunnerService.ServiceUrl
+      - name: Get service URL
+        run: |
+          SERVICE_URL=$(aws apprunner describe-service \
+            --service-arn ${{ secrets.ISSUANCE_SERVICE_ARN }} \
+            --query 'Service.ServiceUrl' \
+            --output text \
+            --region ${{ env.AWS_REGION }})
+          echo "Service URL: https://$SERVICE_URL"
