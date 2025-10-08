@@ -52,7 +52,7 @@ jobs:
       - name: Prepare nodegroup file
         run: |
           NODE_TYPE="${{ github.event.inputs.node-instance-type }}"
-          cp infra/nodegroup.yaml /tmp/nodegroup.yaml
+          cp .github/workflows/nodegroup.yaml /tmp/nodegroup.yaml
           sed -i "s/instanceType: .*/instanceType: ${NODE_TYPE}/" /tmp/nodegroup.yaml || true
           echo "/tmp/nodegroup.yaml:"
           sed -n '1,200p' /tmp/nodegroup.yaml
