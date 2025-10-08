@@ -1030,6 +1030,8 @@
 
 
 
+
+
 name: Deploy to EKS
 
 on:
@@ -1266,7 +1268,7 @@ jobs:
               echo "  === Status Check ==="
               
               if [ "$TOTAL_NODES" -eq 0 ]; then
-                echo "  ⚠️  NO NODES REGISTERED WITH CLUSTER YET"
+                echo "    NO NODES REGISTERED WITH CLUSTER YET"
                 echo "  This means EC2 instances haven't joined the cluster."
                 echo ""
                 echo "  Checking Auto Scaling Group for EC2 instances..."
@@ -1288,7 +1290,7 @@ jobs:
                   echo "  EC2 instances in ASG: $INSTANCE_COUNT"
                   
                   if [ "$INSTANCE_COUNT" -eq 0 ]; then
-                    echo "  ❌ NO EC2 INSTANCES LAUNCHED"
+                    echo "   NO EC2 INSTANCES LAUNCHED"
                     echo "  Possible causes:"
                     echo "    - Instance type unavailable in the region"
                     echo "    - Service quota limits"
