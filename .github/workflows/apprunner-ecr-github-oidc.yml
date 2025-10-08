@@ -61,15 +61,21 @@ jobs:
       - name: Get infrastructure IDs
         id: get-infra
         run: |
-          VPC_ID=$(aws ssm get-parameter --name /zupple/vpc-id --region ${{ env.AWS_REGION }} --query 'Parameter.Value' --output text)
-          SUBNET1_ID=$(aws ssm get-parameter --name /zupple/subnet1-id --region ${{ env.AWS_REGION }} --query 'Parameter.Value' --output text)
-          SUBNET2_ID=$(aws ssm get-parameter --name /zupple/subnet2-id --region ${{ env.AWS_REGION }} --query 'Parameter.Value' --output text)
-          SG_ID=$(aws ssm get-parameter --name /zupple/security-group-id --region ${{ env.AWS_REGION }} --query 'Parameter.Value' --output text)
+          # Query infrastructure by tags and filters
+          VPC_ID=$(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=zupple-vpc" --region ${{ env.AWS_REGION }} --query 'Vpcs[0].VpcId' --output text)
+          SUBNET1_ID=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" "Name=availability-zone,Values=${AWS_REGION}a" --region ${{ env.AWS_REGION }} --query 'Subnets[0].SubnetId' --output text)
+          SUBNET2_ID=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" "Name=availability-zone,Values=${AWS_REGION}b" --region ${{ env.AWS_REGION }} --query 'Subnets[0].SubnetId' --output text)
+          SG_ID=$(aws ec2 describe-security-groups --filters "Name=group-name,Values=zupple-ecs-sg" "Name=vpc-id,Values=$VPC_ID" --region ${{ env.AWS_REGION }} --query 'SecurityGroups[0].GroupId' --output text)
           
           echo "vpc_id=$VPC_ID" >> $GITHUB_OUTPUT
           echo "subnet1_id=$SUBNET1_ID" >> $GITHUB_OUTPUT
           echo "subnet2_id=$SUBNET2_ID" >> $GITHUB_OUTPUT
           echo "sg_id=$SG_ID" >> $GITHUB_OUTPUT
+          
+          echo "✅ Retrieved infrastructure IDs"
+          echo "VPC: $VPC_ID"
+          echo "Subnets: $SUBNET1_ID, $SUBNET2_ID"
+          echo "Security Group: $SG_ID"
 
       - name: Create/Update ECS Task Definition
         id: task-def
