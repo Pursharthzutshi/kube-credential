@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { verifyCredential } from '../api';
+import type { AxiosError } from 'axios';
 
 export default function VerificationPage() {
   const [id, setId] = useState('');
@@ -14,8 +15,9 @@ export default function VerificationPage() {
     try {
       const res = await verifyCredential({ id });
       setMsg(JSON.stringify(res, null, 2));
-    } catch (err: any) {
-      setMsg(err?.response?.data?.error || err.message);
+    } catch (err) {
+      const error = err as AxiosError<{ error?: string }>;
+      setMsg(error.response?.data?.error || error.message);
     } finally {
       setLoading(false);
     }
@@ -30,7 +32,9 @@ export default function VerificationPage() {
 
         <form onSubmit={onVerify}>
           <div className="mb-4">
-            <label className="block font-medium text-gray-700 mb-1">Credential ID:</label>
+            <label className="block font-medium text-gray-700 mb-1">
+              Credential ID:
+            </label>
             <input
               type="text"
               value={id}

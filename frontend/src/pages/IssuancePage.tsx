@@ -1,11 +1,12 @@
 import { useState } from 'react';
 import { issueCredential } from '../api.ts';
+import type { IssuanceResult } from '../types.ts';
 
 export default function IssuePage() {
   const [id, setId] = useState('');
   const [holder, setHolder] = useState('');
   const [subject, setSubject] = useState('{}');
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<IssuanceResult | null>(null);
   const [loading, setLoading] = useState(false);
 
   const handleIssue = async () => {

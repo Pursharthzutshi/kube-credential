@@ -11,15 +11,14 @@ export interface VerificationPayload {
 
 export interface CredentialData {
   id: string;
-  issuedAt: string; // ISO timestamp
+  issuedAt: string; 
   name: string;
-  email: string; 
+  email: string;
   role: string;
 }
 
 export interface IssuanceResult {
   credential: CredentialData;
-  // add other fields your issuance endpoint returns
 }
 
 export interface VerificationResult {
@@ -28,9 +27,12 @@ export interface VerificationResult {
   credential?: CredentialData;
 }
 
-export interface ApiResponse<T = any> {
+
+export type ApiError = string | { message?: string; [key: string]: unknown } | unknown;
+
+export interface ApiResponse<T = unknown> {
   ok: boolean;
   data?: T;
   status?: number | null;
-  error?: any;
+  error?: ApiError;
 }
