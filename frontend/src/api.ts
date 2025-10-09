@@ -45,8 +45,16 @@ const VERIFY_BASE = resolveBaseUrl({
   serviceName: 'verification',
 });
 
+function resolveTimeoutMs() {
+  const raw = import.meta.env.VITE_API_TIMEOUT_MS;
+  if (!raw) return 15000;
+
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 15000;
+}
+
 const axiosInstance = axios.create({
-  timeout: 5000,
+  timeout: resolveTimeoutMs(),
   headers: { 'Content-Type': 'application/json' },
 });
 
