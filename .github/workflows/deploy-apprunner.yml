@@ -58,7 +58,7 @@ jobs:
           docker push $ECR_REGISTRY/$IMAGE_NAME:latest
 
       - name: Trigger App Runner deployment
-        if: secrets[matrix.app_runner_secret_key] != ''
+        if: ${{ secrets[matrix.app_runner_secret_key] != '' }}
         env:
           SERVICE_ARN: ${{ secrets[matrix.app_runner_secret_key] }}
           ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
@@ -70,7 +70,7 @@ jobs:
             --region "${AWS_REGION}"
 
       - name: Fail if App Runner service ARN missing
-        if: secrets[matrix.app_runner_secret_key] == ''
+        if: ${{ secrets[matrix.app_runner_secret_key] == '' }}
         run: |
           echo "App Runner service ARN secret '${{ matrix.app_runner_secret_key }}' is not set." >&2
           exit 1
