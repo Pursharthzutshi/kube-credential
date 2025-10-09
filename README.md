@@ -127,3 +127,9 @@
 - Render (APIs): set `ALLOWED_ORIGINS` to include your Vercel domain(s) and configure `WORKER_ID` if you want deterministic IDs in logs.
 - Vercel (frontend): set `VITE_ISSUANCE_URL`, `VITE_VERIFY_URL`, `VITE_API_TIMEOUT_MS`, `VITE_API_RETRY_ATTEMPTS`, `VITE_API_RETRY_DELAY_MS`.
 - Ensure both backends point to the same MongoDB cluster so verification can locate issued credentials.
+
+**My Contact Details**
+
+Name: Pursharth Zutshi
+Email Id: 13phzi@gmail.com
+Phone No: +918360569922
