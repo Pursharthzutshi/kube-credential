@@ -1,555 +1,76 @@
-# # name: Deploy Services to ECS Fargate
-
-# # on:
-# #   push:
-# #     branches:
-# #       - main
-# #     paths:
-# #       - 'backend/verification-service/**'
-# #       - 'backend/issuance-service/**'
-# #       - '.github/workflows/deploy-verification-ecs.yml'
-# #   workflow_dispatch:
-
-# # env:
-# #   AWS_REGION: us-east-1
-
-# # jobs:
-# #   deploy:
-# #     name: Deploy to ECS (per service)
-# #     runs-on: ubuntu-latest
-# #     strategy:
-# #       matrix:
-# #         include:
-# #           - service: verification
-# #             ecr_repository: verification-service
-# #             directory: verification-service
-# #             ecs_cluster: zupple-cluster
-# #             ecs_service: verification-service
-# #             task_definition: verification-task
-# #             container_name: verification-service
-# #             container_port: 4001
-# #           - service: issuance
-# #             ecr_repository: issuance-service
-# #             directory: issuance-service
-# #             ecs_cluster: zupple-cluster
-# #             ecs_service: issuance-service
-# #             task_definition: issuance-task
-# #             container_name: issuance-service
-# #             container_port: 4002
-
-# #     steps:
-# #       - name: Checkout code
-# #         uses: actions/checkout@v4
-
-# #       - name: Configure AWS credentials
-# #         uses: aws-actions/configure-aws-credentials@v4
-# #         with:
-# #           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-# #           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-# #           aws-region: ${{ env.AWS_REGION }}
-
-# #       - name: Login to Amazon ECR
-# #         id: login-ecr
-# #         uses: aws-actions/amazon-ecr-login@v2
-
-# #       - name: Create ECR repository if it doesn't exist
-# #         run: |
-# #           aws ecr describe-repositories --repository-names ${{ matrix.ecr_repository }} --region ${{ env.AWS_REGION }} || \
-# #           aws ecr create-repository \
-# #             --repository-name ${{ matrix.ecr_repository }} \
-# #             --region ${{ env.AWS_REGION }} \
-# #             --image-scanning-configuration scanOnPush=true
-
-# #       - name: Build, tag, and push image to Amazon ECR
-# #         id: build-image
-# #         env:
-# #           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-# #           IMAGE_TAG: ${{ github.sha }}
-# #         run: |
-# #           cd backend/${{ matrix.directory }}
-# #           docker build -t $ECR_REGISTRY/${{ matrix.ecr_repository }}:$IMAGE_TAG .
-# #           docker tag $ECR_REGISTRY/${{ matrix.ecr_repository }}:$IMAGE_TAG $ECR_REGISTRY/${{ matrix.ecr_repository }}:latest
-# #           docker push $ECR_REGISTRY/${{ matrix.ecr_repository }}:$IMAGE_TAG
-# #           docker push $ECR_REGISTRY/${{ matrix.ecr_repository }}:latest
-# #           echo "image=$ECR_REGISTRY/${{ matrix.ecr_repository }}:$IMAGE_TAG" >> $GITHUB_OUTPUT
-
-# #       - name: Setup infrastructure and get IDs
-# #         id: get-infra
-# #         run: |
-# #           if ! aws ecs describe-clusters --clusters ${{ matrix.ecs_cluster }} --region ${{ env.AWS_REGION }} --query 'clusters[0].status' --output text 2>/dev/null | grep -q ACTIVE; then
-# #             VPC_ID=$(aws ec2 create-vpc --cidr-block 10.0.0.0/16 --region ${{ env.AWS_REGION }} --query 'Vpc.VpcId' --output text)
-# #             aws ec2 create-tags --resources $VPC_ID --tags Key=Name,Value=zupple-vpc --region ${{ env.AWS_REGION }}
-# #             aws ec2 modify-vpc-attribute --vpc-id $VPC_ID --enable-dns-hostnames --region ${{ env.AWS_REGION }}
-# #             aws ec2 modify-vpc-attribute --vpc-id $VPC_ID --enable-dns-support --region ${{ env.AWS_REGION }}
-# #             IGW_ID=$(aws ec2 create-internet-gateway --region ${{ env.AWS_REGION }} --query 'InternetGateway.InternetGatewayId' --output text)
-# #             aws ec2 attach-internet-gateway --vpc-id $VPC_ID --internet-gateway-id $IGW_ID --region ${{ env.AWS_REGION }}
-# #             SUBNET1_ID=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.1.0/24 --availability-zone ${AWS_REGION}a --region ${{ env.AWS_REGION }} --query 'Subnet.SubnetId' --output text)
-# #             SUBNET2_ID=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.2.0/24 --availability-zone ${AWS_REGION}b --region ${{ env.AWS_REGION }} --query 'Subnet.SubnetId' --output text)
-# #             aws ec2 modify-subnet-attribute --subnet-id $SUBNET1_ID --map-public-ip-on-launch --region ${{ env.AWS_REGION }}
-# #             aws ec2 modify-subnet-attribute --subnet-id $SUBNET2_ID --map-public-ip-on-launch --region ${{ env.AWS_REGION }}
-# #             RT_ID=$(aws ec2 create-route-table --vpc-id $VPC_ID --region ${{ env.AWS_REGION }} --query 'RouteTable.RouteTableId' --output text)
-# #             aws ec2 create-route --route-table-id $RT_ID --destination-cidr-block 0.0.0.0/0 --gateway-id $IGW_ID --region ${{ env.AWS_REGION }}
-# #             aws ec2 associate-route-table --subnet-id $SUBNET1_ID --route-table-id $RT_ID --region ${{ env.AWS_REGION }}
-# #             aws ec2 associate-route-table --subnet-id $SUBNET2_ID --route-table-id $RT_ID --region ${{ env.AWS_REGION }}
-# #             SG_ID=$(aws ec2 create-security-group --group-name zupple-ecs-sg --description "Security group for Zupple ECS services" --vpc-id $VPC_ID --region ${{ env.AWS_REGION }} --query 'GroupId' --output text)
-# #             aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port 4001 --cidr 0.0.0.0/0 --region ${{ env.AWS_REGION }}
-# #             aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port 4002 --cidr 0.0.0.0/0 --region ${{ env.AWS_REGION }}
-# #             aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port 80 --cidr 0.0.0.0/0 --region ${{ env.AWS_REGION }}
-# #             aws ecs create-cluster --cluster-name ${{ matrix.ecs_cluster }} --region ${{ env.AWS_REGION }}
-# #             aws iam create-role --role-name ecsTaskExecutionRole --assume-role-policy-document '{
-# #               "Version": "2012-10-17",
-# #               "Statement": [{
-# #                 "Effect": "Allow",
-# #                 "Principal": {"Service": "ecs-tasks.amazonaws.com"},
-# #                 "Action": "sts:AssumeRole"
-# #               }]
-# #             }' 2>/dev/null || true
-# #             aws iam attach-role-policy --role-name ecsTaskExecutionRole --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy 2>/dev/null || true
-# #             aws iam put-role-policy --role-name ecsTaskExecutionRole --policy-name CloudWatchLogsPolicy --policy-document '{
-# #               "Version": "2012-10-17",
-# #               "Statement": [{
-# #                 "Effect": "Allow",
-# #                 "Action": ["logs:CreateLogGroup","logs:CreateLogStream","logs:PutLogEvents","logs:DescribeLogStreams"],
-# #                 "Resource": "arn:aws:logs:*:*:*"
-# #               }]
-# #             }' 2>/dev/null || true
-# #             echo "vpc_id=$VPC_ID" >> $GITHUB_OUTPUT
-# #             echo "subnet1_id=$SUBNET1_ID" >> $GITHUB_OUTPUT
-# #             echo "subnet2_id=$SUBNET2_ID" >> $GITHUB_OUTPUT
-# #             echo "sg_id=$SG_ID" >> $GITHUB_OUTPUT
-# #           else
-# #             VPC_ID=$(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=zupple-vpc" --region ${{ env.AWS_REGION }} --query 'Vpcs[0].VpcId' --output text)
-# #             SUBNET1_ID=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" "Name=availability-zone,Values=${AWS_REGION}a" --region ${{ env.AWS_REGION }} --query 'Subnets[0].SubnetId' --output text)
-# #             SUBNET2_ID=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" "Name=availability-zone,Values=${AWS_REGION}b" --region ${{ env.AWS_REGION }} --query 'Subnets[0].SubnetId' --output text)
-# #             SG_ID=$(aws ec2 describe-security-groups --filters "Name=group-name,Values=zupple-ecs-sg" "Name=vpc-id,Values=$VPC_ID" --region ${{ env.AWS_REGION }} --query 'SecurityGroups[0].GroupId' --output text)
-# #             echo "vpc_id=$VPC_ID" >> $GITHUB_OUTPUT
-# #             echo "subnet1_id=$SUBNET1_ID" >> $GITHUB_OUTPUT
-# #             echo "subnet2_id=$SUBNET2_ID" >> $GITHUB_OUTPUT
-# #             echo "sg_id=$SG_ID" >> $GITHUB_OUTPUT
-# #           fi
-
-# #       - name: Create/Update ECS Task Definition
-# #         id: task-def
-# #         run: |
-# #           AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          
-# #           cat > task-definition.json <<EOF
-# #           {
-# #             "family": "${{ matrix.task_definition }}",
-# #             "networkMode": "awsvpc",
-# #             "requiresCompatibilities": ["FARGATE"],
-# #             "cpu": "256",
-# #             "memory": "512",
-# #             "executionRoleArn": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/ecsTaskExecutionRole",
-# #             "containerDefinitions": [
-# #               {
-# #                 "name": "${{ matrix.container_name }}",
-# #                 "image": "${{ steps.build-image.outputs.image }}",
-# #                 "portMappings": [{ "containerPort": ${{ matrix.container_port }}, "protocol": "tcp" }],
-# #                 "environment": [
-# #                   {
-# #                     "name": "MONGO_URI",
-# #                     "value": "${{ secrets.MONGO_URI }}"
-# #                   },
-# #                   {
-# #                     "name": "NODE_ENV",
-# #                     "value": "production"
-# #                   }
-# #                 ],
-# #                 "essential": true,
-# #                 "logConfiguration": {
-# #                   "logDriver": "awslogs",
-# #                   "options": {
-# #                     "awslogs-group": "/ecs/${{ matrix.task_definition }}",
-# #                     "awslogs-region": "${{ env.AWS_REGION }}",
-# #                     "awslogs-stream-prefix": "ecs",
-# #                     "awslogs-create-group": "true"
-# #                   }
-# #                 }
-# #               }
-# #             ]
-# #           }
-# #           EOF
-          
-# #           aws ecs register-task-definition --cli-input-json file://task-definition.json --region ${{ env.AWS_REGION }}
-
-# #       - name: Create or Update ECS Service
-# #         run: |
-# #           if aws ecs describe-services --cluster ${{ matrix.ecs_cluster }} --services ${{ matrix.ecs_service }} --region ${{ env.AWS_REGION }} --query 'services[0].status' --output text | grep -q ACTIVE; then
-# #             aws ecs update-service \
-# #               --cluster ${{ matrix.ecs_cluster }} \
-# #               --service ${{ matrix.ecs_service }} \
-# #               --task-definition ${{ matrix.task_definition }} \
-# #               --force-new-deployment \
-# #               --region ${{ env.AWS_REGION }}
-# #           else
-# #             aws ecs create-service \
-# #               --cluster ${{ matrix.ecs_cluster }} \
-# #               --service-name ${{ matrix.ecs_service }} \
-# #               --task-definition ${{ matrix.task_definition }} \
-# #               --desired-count 1 \
-# #               --launch-type FARGATE \
-# #               --network-configuration "awsvpcConfiguration={subnets=[${{ steps.get-infra.outputs.subnet1_id }},${{ steps.get-infra.outputs.subnet2_id }}],securityGroups=[${{ steps.get-infra.outputs.sg_id }}],assignPublicIp=ENABLED}" \
-# #               --region ${{ env.AWS_REGION }}
-# #           fi
-
-# #       - name: Wait for service stability
-# #         run: |
-# #           aws ecs wait services-stable \
-# #             --cluster ${{ matrix.ecs_cluster }} \
-# #             --services ${{ matrix.ecs_service }} \
-# #             --region ${{ env.AWS_REGION }}
-
-# #       - name: Get service info
-# #         run: |
-# #           TASK_ARN=$(aws ecs list-tasks --cluster ${{ matrix.ecs_cluster }} --service-name ${{ matrix.ecs_service }} --region ${{ env.AWS_REGION }} --query "taskArns[0]" --output text)
-# #           if [ -n "$TASK_ARN" ]; then
-# #             ENI_ID=$(aws ecs describe-tasks \
-# #               --cluster ${{ matrix.ecs_cluster }} \
-# #               --tasks "$TASK_ARN" \
-# #               --region ${{ env.AWS_REGION }} \
-# #               --query "tasks[0].attachments[0].details[?name=='networkInterfaceId'].value" \
-# #               --output text)
-# #             PUBLIC_IP=$(aws ec2 describe-network-interfaces --network-interface-ids $ENI_ID --region ${{ env.AWS_REGION }} --query "NetworkInterfaces[0].Association.PublicIp" --output text)
-# #             echo "Service ${{ matrix.ecs_service }} deployed successfully!"
-# #             echo "Access URL: http://$PUBLIC_IP:${{ matrix.container_port }}"
-# #           fi
-
-# name: Deploy Services to ECS Fargate
-
-# on:
-#   push:
-#     branches:
-#       - main
-#     paths:
-#       - 'backend/verification-service/**'
-#       - 'backend/issuance-service/**'
-#       - '.github/workflows/deploy-verification-ecs.yml'
-#   workflow_dispatch:
-
-# env:
-#   AWS_REGION: us-east-1
-
-# jobs:
-#   deploy:
-#     name: Deploy to ECS (per service)
-#     runs-on: ubuntu-latest
-#     strategy:
-#       matrix:
-#         include:
-#           - service: verification
-#             ecr_repository: verification-service
-#             directory: verification-service
-#             ecs_cluster: zupple-cluster
-#             ecs_service: verification-service
-#             task_definition: verification-task
-#             container_name: verification-service
-#             container_port: 4001
-#           - service: issuance
-#             ecr_repository: issuance-service
-#             directory: issuance-service
-#             ecs_cluster: zupple-cluster
-#             ecs_service: issuance-service
-#             task_definition: issuance-task
-#             container_name: issuance-service
-#             container_port: 4002
-
-#     steps:
-#       - name: Checkout code
-#         uses: actions/checkout@v4
-
-#       - name: Configure AWS credentials
-#         uses: aws-actions/configure-aws-credentials@v4
-#         with:
-#           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-#           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-#           aws-region: ${{ env.AWS_REGION }}
-
-#       - name: Login to Amazon ECR
-#         id: login-ecr
-#         uses: aws-actions/amazon-ecr-login@v2
-
-#       - name: Create ECR repository if it doesn't exist
-#         run: |
-#           aws ecr describe-repositories --repository-names ${{ matrix.ecr_repository }} --region ${{ env.AWS_REGION }} || \
-#           aws ecr create-repository \
-#             --repository-name ${{ matrix.ecr_repository }} \
-#             --region ${{ env.AWS_REGION }} \
-#             --image-scanning-configuration scanOnPush=true
-
-#       - name: Build, tag, and push image to Amazon ECR
-#         id: build-image
-#         env:
-#           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-#           IMAGE_TAG: ${{ github.sha }}
-#         run: |
-#           cd backend/${{ matrix.directory }}
-#           docker build -t $ECR_REGISTRY/${{ matrix.ecr_repository }}:$IMAGE_TAG .
-#           docker tag $ECR_REGISTRY/${{ matrix.ecr_repository }}:$IMAGE_TAG $ECR_REGISTRY/${{ matrix.ecr_repository }}:latest
-#           docker push $ECR_REGISTRY/${{ matrix.ecr_repository }}:$IMAGE_TAG
-#           docker push $ECR_REGISTRY/${{ matrix.ecr_repository }}:latest
-#           echo "image=$ECR_REGISTRY/${{ matrix.ecr_repository }}:$IMAGE_TAG" >> $GITHUB_OUTPUT
-
-#       - name: Setup infrastructure and get IDs
-#         id: get-infra
-#         run: |
-#           if ! aws ecs describe-clusters --clusters ${{ matrix.ecs_cluster }} --region ${{ env.AWS_REGION }} --query 'clusters[0].status' --output text 2>/dev/null | grep -q ACTIVE; then
-#             VPC_ID=$(aws ec2 create-vpc --cidr-block 10.0.0.0/16 --region ${{ env.AWS_REGION }} --query 'Vpc.VpcId' --output text)
-#             aws ec2 create-tags --resources $VPC_ID --tags Key=Name,Value=zupple-vpc --region ${{ env.AWS_REGION }}
-#             aws ec2 modify-vpc-attribute --vpc-id $VPC_ID --enable-dns-hostnames --region ${{ env.AWS_REGION }}
-#             aws ec2 modify-vpc-attribute --vpc-id $VPC_ID --enable-dns-support --region ${{ env.AWS_REGION }}
-#             IGW_ID=$(aws ec2 create-internet-gateway --region ${{ env.AWS_REGION }} --query 'InternetGateway.InternetGatewayId' --output text)
-#             aws ec2 attach-internet-gateway --vpc-id $VPC_ID --internet-gateway-id $IGW_ID --region ${{ env.AWS_REGION }}
-#             SUBNET1_ID=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.1.0/24 --availability-zone ${AWS_REGION}a --region ${{ env.AWS_REGION }} --query 'Subnet.SubnetId' --output text)
-#             SUBNET2_ID=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.2.0/24 --availability-zone ${AWS_REGION}b --region ${{ env.AWS_REGION }} --query 'Subnet.SubnetId' --output text)
-#             aws ec2 modify-subnet-attribute --subnet-id $SUBNET1_ID --map-public-ip-on-launch --region ${{ env.AWS_REGION }}
-#             aws ec2 modify-subnet-attribute --subnet-id $SUBNET2_ID --map-public-ip-on-launch --region ${{ env.AWS_REGION }}
-#             RT_ID=$(aws ec2 create-route-table --vpc-id $VPC_ID --region ${{ env.AWS_REGION }} --query 'RouteTable.RouteTableId' --output text)
-#             aws ec2 create-route --route-table-id $RT_ID --destination-cidr-block 0.0.0.0/0 --gateway-id $IGW_ID --region ${{ env.AWS_REGION }}
-#             aws ec2 associate-route-table --subnet-id $SUBNET1_ID --route-table-id $RT_ID --region ${{ env.AWS_REGION }}
-#             aws ec2 associate-route-table --subnet-id $SUBNET2_ID --route-table-id $RT_ID --region ${{ env.AWS_REGION }}
-#             SG_ID=$(aws ec2 create-security-group --group-name zupple-ecs-sg --description "Security group for Zupple ECS services" --vpc-id $VPC_ID --region ${{ env.AWS_REGION }} --query 'GroupId' --output text)
-#             aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port 4001 --cidr 0.0.0.0/0 --region ${{ env.AWS_REGION }}
-#             aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port 4002 --cidr 0.0.0.0/0 --region ${{ env.AWS_REGION }}
-#             aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port 443 --cidr 0.0.0.0/0 --region ${{ env.AWS_REGION }}
-#             aws ecs create-cluster --cluster-name ${{ matrix.ecs_cluster }} --region ${{ env.AWS_REGION }}
-#             echo "vpc_id=$VPC_ID" >> $GITHUB_OUTPUT
-#             echo "subnet1_id=$SUBNET1_ID" >> $GITHUB_OUTPUT
-#             echo "subnet2_id=$SUBNET2_ID" >> $GITHUB_OUTPUT
-#             echo "sg_id=$SG_ID" >> $GITHUB_OUTPUT
-#           fi
-
-#       - name: Create/Update ECS Task Definition
-#         id: task-def
-#         run: |
-#           AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-#           cat > task-definition.json <<EOF
-#           {
-#             "family": "${{ matrix.task_definition }}",
-#             "networkMode": "awsvpc",
-#             "requiresCompatibilities": ["FARGATE"],
-#             "cpu": "256",
-#             "memory": "512",
-#             "executionRoleArn": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/ecsTaskExecutionRole",
-#             "containerDefinitions": [
-#               {
-#                 "name": "${{ matrix.container_name }}",
-#                 "image": "${{ steps.build-image.outputs.image }}",
-#                 "portMappings": [{ "containerPort": ${{ matrix.container_port }}, "protocol": "tcp" }],
-#                 "environment": [
-#                   { "name": "MONGO_URI", "value": "${{ secrets.MONGO_URI }}" },
-#                   { "name": "NODE_ENV", "value": "production" }
-#                 ],
-#                 "essential": true
-#               }
-#             ]
-#           }
-#           EOF
-#           aws ecs register-task-definition --cli-input-json file://task-definition.json --region ${{ env.AWS_REGION }}
-
-#       - name: Create or Update ECS Service
-#         run: |
-#           if aws ecs describe-services --cluster ${{ matrix.ecs_cluster }} --services ${{ matrix.ecs_service }} --region ${{ env.AWS_REGION }} --query 'services[0].status' --output text | grep -q ACTIVE; then
-#             aws ecs update-service \
-#               --cluster ${{ matrix.ecs_cluster }} \
-#               --service ${{ matrix.ecs_service }} \
-#               --task-definition ${{ matrix.task_definition }} \
-#               --force-new-deployment \
-#               --region ${{ env.AWS_REGION }}
-#           else
-#             aws ecs create-service \
-#               --cluster ${{ matrix.ecs_cluster }} \
-#               --service-name ${{ matrix.ecs_service }} \
-#               --task-definition ${{ matrix.task_definition }} \
-#               --desired-count 1 \
-#               --launch-type FARGATE \
-#               --network-configuration "awsvpcConfiguration={subnets=[${{ steps.get-infra.outputs.subnet1_id }},${{ steps.get-infra.outputs.subnet2_id }}],securityGroups=[${{ steps.get-infra.outputs.sg_id }}],assignPublicIp=ENABLED}" \
-#               --region ${{ env.AWS_REGION }}
-#           fi
-
-#       - name: Wait for service stability
-#         run: |
-#           aws ecs wait services-stable \
-#             --cluster ${{ matrix.ecs_cluster }} \
-#             --services ${{ matrix.ecs_service }} \
-#             --region ${{ env.AWS_REGION }}
-
-#       - name: Get service info
-#         run: |
-#           TASK_ARN=$(aws ecs list-tasks --cluster ${{ matrix.ecs_cluster }} --service-name ${{ matrix.ecs_service }} --region ${{ env.AWS_REGION }} --query "taskArns[0]" --output text)
-#           if [ -n "$TASK_ARN" ]; then
-#             ENI_ID=$(aws ecs describe-tasks \
-#               --cluster ${{ matrix.ecs_cluster }} \
-#               --tasks "$TASK_ARN" \
-#               --region ${{ env.AWS_REGION }} \
-#               --query "tasks[0].attachments[0].details[?name=='networkInterfaceId'].value" \
-#               --output text)
-#             PUBLIC_IP=$(aws ec2 describe-network-interfaces --network-interface-ids $ENI_ID --region ${{ env.AWS_REGION }} --query "NetworkInterfaces[0].Association.PublicIp" --output text)
-#             echo "Service ${{ matrix.ecs_service }} deployed successfully!"
-#             echo "Access URL: https://$PUBLIC_IP:${{ matrix.container_port }}"
-#           fi
-
-
-name: Deploy Services to AWS App Runner
+name: Deploy Backend via App Runner
 
 on:
   push:
     branches:
       - main
     paths:
-      - 'backend/verification-service/**'
       - 'backend/issuance-service/**'
-      - '.github/workflows/deploy-apprunner.yml'
+      - 'backend/verification-service/**'
+      - '.github/workflows/apprunner-ecr-github-oide.yml'
   workflow_dispatch:
 
 env:
-  AWS_REGION: us-east-1
+  AWS_REGION: ${{ vars.AWS_REGION || secrets.AWS_REGION || 'us-east-1' }}
 
 jobs:
   deploy:
-    name: Deploy to AWS App Runner (per service)
+    name: Build image and trigger App Runner
     runs-on: ubuntu-latest
     strategy:
       matrix:
         include:
-          - service: verification
-            ecr_repository: verification-service
-            directory: verification-service
-            apprunner_service_name: verification-service
-            container_port: 4001
           - service: issuance
+            directory: backend/issuance-service
             ecr_repository: issuance-service
-            directory: issuance-service
-            apprunner_service_name: issuance-service
-            container_port: 4002
+            app_runner_secret_key: APP_RUNNER_ISSUANCE_SERVICE_ARN
+          - service: verification
+            directory: backend/verification-service
+            ecr_repository: verification-service
+            app_runner_secret_key: APP_RUNNER_VERIFICATION_SERVICE_ARN
+
+    permissions:
+      id-token: write
+      contents: read
 
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ secrets.AWS_GITHUB_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Login to Amazon ECR
-        id: login-ecr
+      - name: Log in to Amazon ECR
+        id: ecr-login
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Create ECR repository if it doesn't exist
-        run: |
-          aws ecr describe-repositories --repository-names ${{ matrix.ecr_repository }} --region ${{ env.AWS_REGION }} || \
-          aws ecr create-repository \
-            --repository-name ${{ matrix.ecr_repository }} \
-            --region ${{ env.AWS_REGION }} \
-            --image-scanning-configuration scanOnPush=true
-
-      - name: Build, tag, and push Docker image
-        id: build-image
+      - name: Build and push image
         env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG: ${{ github.sha }}
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_NAME: ${{ matrix.ecr_repository }}
         run: |
-          cd backend/${{ matrix.directory }}
-          docker build -t $ECR_REGISTRY/${{ matrix.ecr_repository }}:$IMAGE_TAG .
-          docker tag $ECR_REGISTRY/${{ matrix.ecr_repository }}:$IMAGE_TAG $ECR_REGISTRY/${{ matrix.ecr_repository }}:latest
-          docker push $ECR_REGISTRY/${{ matrix.ecr_repository }}:$IMAGE_TAG
-          docker push $ECR_REGISTRY/${{ matrix.ecr_repository }}:latest
-          echo "image=$ECR_REGISTRY/${{ matrix.ecr_repository }}:$IMAGE_TAG" >> $GITHUB_OUTPUT
+          docker build -t $ECR_REGISTRY/$IMAGE_NAME:${GITHUB_SHA} ${{ matrix.directory }}
+          docker push $ECR_REGISTRY/$IMAGE_NAME:${GITHUB_SHA}
+          docker tag $ECR_REGISTRY/$IMAGE_NAME:${GITHUB_SHA} $ECR_REGISTRY/$IMAGE_NAME:latest
+          docker push $ECR_REGISTRY/$IMAGE_NAME:latest
 
-      - name: Ensure IAM Role for App Runner exists
-        id: create-role
-        run: |
-          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          ROLE_NAME="AppRunnerECRAccessRole"
-          ROLE_EXISTS=$(aws iam list-roles --query "Roles[?RoleName=='$ROLE_NAME'].RoleName" --output text)
-
-          if [ -z "$ROLE_EXISTS" ]; then
-            echo "Creating IAM role $ROLE_NAME..."
-            TRUST_POLICY=$(cat <<EOF
-          {
-            "Version": "2012-10-17",
-            "Statement": [
-              {
-                "Effect": "Allow",
-                "Principal": {
-                  "Service": "build.apprunner.amazonaws.com"
-                },
-                "Action": "sts:AssumeRole"
-              }
-            ]
-          }
-          EOF
-          )
-            echo "$TRUST_POLICY" > trust-policy.json
-            aws iam create-role \
-              --role-name $ROLE_NAME \
-              --assume-role-policy-document file://trust-policy.json \
-              --region ${{ env.AWS_REGION }}
-            aws iam attach-role-policy \
-              --role-name $ROLE_NAME \
-              --policy-arn arn:aws:iam::aws:policy/AWSAppRunnerServicePolicyForECRAccess
-            echo " Created IAM role $ROLE_NAME"
-          else
-            echo " IAM role $ROLE_NAME already exists"
-          fi
-
-          echo "role_arn=arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME" >> $GITHUB_OUTPUT
-
-      - name: Create or Update AWS App Runner Service
-        id: apprunner
+      - name: Trigger App Runner deployment
+        if: ${{ secrets[matrix.app_runner_secret_key] != '' }}
         env:
-          IMAGE_URI: ${{ steps.build-image.outputs.image }}
-          ROLE_ARN: ${{ steps.create-role.outputs.role_arn }}
+          SERVICE_ARN: ${{ secrets[matrix.app_runner_secret_key] }}
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_NAME: ${{ matrix.ecr_repository }}
         run: |
-          SERVICE_ARN=$(aws apprunner list-services --region ${{ env.AWS_REGION }} \
-            --query "ServiceSummaryList[?ServiceName=='${{ matrix.apprunner_service_name }}'].ServiceArn" --output text)
+          aws apprunner update-service \
+            --service-arn "$SERVICE_ARN" \
+            --source-configuration "ImageRepository={ImageIdentifier=${ECR_REGISTRY}/${IMAGE_NAME}:${GITHUB_SHA},ImageRepositoryType=ECR}" \
+            --region "${AWS_REGION}"
 
-          if [ "$SERVICE_ARN" == "None" ] || [ -z "$SERVICE_ARN" ]; then
-            echo "Creating new App Runner service: ${{ matrix.apprunner_service_name }}"
-            aws apprunner create-service \
-              --service-name ${{ matrix.apprunner_service_name }} \
-              --source-configuration "{
-                \"ImageRepository\": {
-                  \"ImageIdentifier\": \"${IMAGE_URI}\",
-                  \"ImageRepositoryType\": \"ECR\",
-                  \"ImageConfiguration\": {
-                    \"Port\": \"${{ matrix.container_port }}\",
-                    \"RuntimeEnvironmentVariables\": [
-                      {\"Name\": \"MONGO_URI\", \"Value\": \"${{ secrets.MONGO_URI }}\"},
-                      {\"Name\": \"NODE_ENV\", \"Value\": \"production\"}
-                    ]
-                  }
-                },
-                \"AuthenticationConfiguration\": {\"AccessRoleArn\": \"${ROLE_ARN}\"}
-              }" \
-              --instance-configuration "Cpu=1 vCPU,Memory=2 GB" \
-              --region ${{ env.AWS_REGION }}
-          else
-            echo "Updating existing App Runner service: ${{ matrix.apprunner_service_name }}"
-            aws apprunner update-service \
-              --service-arn "$SERVICE_ARN" \
-              --source-configuration "{
-                \"ImageRepository\": {
-                  \"ImageIdentifier\": \"${IMAGE_URI}\",
-                  \"ImageRepositoryType\": \"ECR\",
-                  \"ImageConfiguration\": {
-                    \"Port\": \"${{ matrix.container_port }}\",
-                    \"RuntimeEnvironmentVariables\": [
-                      {\"Name\": \"MONGO_URI\", \"Value\": \"${{ secrets.MONGO_URI }}\"},
-                      {\"Name\": \"NODE_ENV\", \"Value\": \"production\"}
-                    ]
-                  }
-                }
-              }" \
-              --region ${{ env.AWS_REGION }}
-          fi
-
-      - name: Get App Runner Service URL
+      - name: Fail if App Runner service ARN missing
+        if: ${{ secrets[matrix.app_runner_secret_key] == '' }}
         run: |
-          URL=$(aws apprunner list-services --region ${{ env.AWS_REGION }} \
-            --query "ServiceSummaryList[?ServiceName=='${{ matrix.apprunner_service_name }}'].ServiceUrl" --output text)
-          echo " ${{ matrix.apprunner_service_name }} deployed successfully!"
-          echo " Access URL: $URL"
+          echo "App Runner service ARN secret '${{ matrix.app_runner_secret_key }}' is not set." >&2
+          exit 1
