@@ -22,9 +22,9 @@ describe('Issuance Service', () => {
   let app: any;
 
   beforeEach(() => {
-    app = createApp();
-    mockGetIssuedCollection.mockReturnValue(mockCollection as any);
     jest.clearAllMocks();
+    mockGetIssuedCollection.mockReturnValue(mockCollection as any);
+    app = createApp();
   });
 
   describe('POST /issue', () => {
