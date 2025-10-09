@@ -45,22 +45,60 @@ const VERIFY_BASE = resolveBaseUrl({
   serviceName: 'verification',
 });
 
-function resolveTimeoutMs() {
-  const raw = import.meta.env.VITE_API_TIMEOUT_MS;
-  if (!raw) return 15000;
-
+function parsePositiveInt(raw: string | undefined, fallback: number) {
+  if (!raw) return fallback;
   const parsed = Number.parseInt(raw, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 15000;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
+
+function resolveTimeoutMs() {
+  return parsePositiveInt(import.meta.env.VITE_API_TIMEOUT_MS, 15000);
+}
+
+const retryConfig = {
+  attempts: parsePositiveInt(import.meta.env.VITE_API_RETRY_ATTEMPTS, 3),
+  baseDelayMs: parsePositiveInt(import.meta.env.VITE_API_RETRY_DELAY_MS, 500),
+};
 
 const axiosInstance = axios.create({
   timeout: resolveTimeoutMs(),
   headers: { 'Content-Type': 'application/json' },
 });
 
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+function isRetryable(error: AxiosError) {
+  if (!error.response) return true;
+  const status = error.response.status;
+  return status >= 500 || status === 429;
+}
+
+async function withRetry<T>(operation: () => Promise<T>): Promise<T> {
+  let attempt = 0;
+  let lastError: unknown;
+
+  while (attempt < retryConfig.attempts) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      attempt += 1;
+
+      if (!axios.isAxiosError(error) || !isRetryable(error) || attempt >= retryConfig.attempts) {
+        throw error;
+      }
+
+      const delay = retryConfig.baseDelayMs * Math.pow(2, attempt - 1);
+      await sleep(delay);
+    }
+  }
+
+  throw lastError;
+}
+
 export async function issueCredential(payload: CredentialPayload): Promise<IssuanceResult> {
   try {
-    const { data } = await axiosInstance.post(`${ISSUANCE_BASE}/issue`, payload);
+    const { data } = await withRetry(() => axiosInstance.post(`${ISSUANCE_BASE}/issue`, payload));
     return { ok: true, data };
   } catch (err) {
     const axiosError = err as AxiosError;
@@ -76,7 +114,7 @@ export async function issueCredential(payload: CredentialPayload): Promise<Issua
 
 export async function verifyCredential(payload: VerificationPayload): Promise<VerificationResult> {
   try {
-    const { data } = await axiosInstance.post(`${VERIFY_BASE}/verify`, payload);
+    const { data } = await withRetry(() => axiosInstance.post(`${VERIFY_BASE}/verify`, payload));
     return { ok: true, data };
   } catch (err) {
     const axiosError = err as AxiosError;
