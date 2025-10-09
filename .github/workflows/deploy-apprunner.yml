@@ -1,0 +1,76 @@
+name: Deploy Backend via App Runner
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'backend/issuance-service/**'
+      - 'backend/verification-service/**'
+      - '.github/workflows/deploy-apprunner.yml'
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || secrets.AWS_REGION || 'us-east-1' }}
+
+jobs:
+  deploy:
+    name: Build image and trigger App Runner
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - service: issuance
+            directory: backend/issuance-service
+            ecr_repository: issuance-service
+            app_runner_secret_key: APP_RUNNER_ISSUANCE_SERVICE_ARN
+          - service: verification
+            directory: backend/verification-service
+            ecr_repository: verification-service
+            app_runner_secret_key: APP_RUNNER_VERIFICATION_SERVICE_ARN
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GITHUB_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_NAME: ${{ matrix.ecr_repository }}
+        run: |
+          docker build -t $ECR_REGISTRY/$IMAGE_NAME:${GITHUB_SHA} ${{ matrix.directory }}
+          docker push $ECR_REGISTRY/$IMAGE_NAME:${GITHUB_SHA}
+          docker tag $ECR_REGISTRY/$IMAGE_NAME:${GITHUB_SHA} $ECR_REGISTRY/$IMAGE_NAME:latest
+          docker push $ECR_REGISTRY/$IMAGE_NAME:latest
+
+      - name: Trigger App Runner deployment
+        if: secrets[matrix.app_runner_secret_key] != ''
+        env:
+          SERVICE_ARN: ${{ secrets[matrix.app_runner_secret_key] }}
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_NAME: ${{ matrix.ecr_repository }}
+        run: |
+          aws apprunner update-service \
+            --service-arn "$SERVICE_ARN" \
+            --source-configuration "ImageRepository={ImageIdentifier=${ECR_REGISTRY}/${IMAGE_NAME}:${GITHUB_SHA},ImageRepositoryType=ECR}" \
+            --region "${AWS_REGION}"
+
+      - name: Fail if App Runner service ARN missing
+        if: secrets[matrix.app_runner_secret_key] == ''
+        run: |
+          echo "App Runner service ARN secret '${{ matrix.app_runner_secret_key }}' is not set." >&2
+          exit 1
